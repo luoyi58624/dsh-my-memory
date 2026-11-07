@@ -21,10 +21,6 @@ export const name = 'my-memory';
 
 /**
  * slots 用来注册落点，layout 用来在面板内关闭（selectPanel(null)）。
- *
- * 这里**故意不写 remote**：`ctx.remote.directoryPicker` 是可选能力，
- * 万一某些外壳版本没有它，把它列进 inject 会让整个插件加载失败（连面板都进不去）。
- * 所以改成运行时探测（见 createNavigation），拿不到就退化成手填路径。
  */
 export const inject = ['slots', 'layout'];
 
@@ -39,11 +35,11 @@ const PANEL_ID = 'my-memory';
  * @param {any} ctx cordis 上下文
  */
 function createNavigation(ctx) {
-  // 系统文件夹选择框（可选能力）：探测不到就给 null，面板自己退回手填弹窗
-  const directoryPicker = ctx?.remote?.directoryPicker;
+  // 复用 DSH 桌面端提供的选框，Web 端没有此入口时由面板显示路径输入框。
+  const directoryPicker = globalThis.__DSH_DIRECTORY_PICKER__;
   const pick =
     typeof directoryPicker?.pick === 'function'
-      ? (signal) => directoryPicker.pick(signal)
+      ? () => directoryPicker.pick()
       : null;
 
   return {
