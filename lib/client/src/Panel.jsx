@@ -53,10 +53,11 @@ const INNER_TABS = [
 const DIR_RE = /^[A-Za-z0-9._-]{1,40}$/;
 
 /**
- * @param {{close?: () => void}} props
- *   close 由槽位 inject 注入（外壳给的关闭回调），拿不到就不渲染关闭按钮。
+ * @param {{close?: () => void, pick?: null | ((signal?: AbortSignal) => Promise<string|null>)}} props
+ *   close 由槽位 inject 注入（外壳给的关闭回调），拿不到就不渲染关闭按钮；
+ *   pick 是外壳的系统文件夹选择框，拿不到就用设置页里的手填弹窗。
  */
-export function MemoryPanel({ close } = {}) {
+export function MemoryPanel({ close, pick } = {}) {
   const [topTab, setTopTab] = React.useState('persona');
   const [tab, setTab] = React.useState('role');
   /** { items, activeId } */
@@ -293,7 +294,7 @@ export function MemoryPanel({ close } = {}) {
       </div>
 
       {topTab === 'settings' ? (
-        <SettingsPage onChanged={onDataDirChanged} />
+        <SettingsPage onChanged={onDataDirChanged} pick={pick} />
       ) : (
         <>
           <div className="dsh-mymem-body">

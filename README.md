@@ -95,7 +95,7 @@ soul-md 是 `memory_append / read / search / rewrite`），但语义重叠会让
 ## 3. 数据在哪、长什么样
 
 ```
-~/.dsh/my-memory/                默认数据根（可以在「全局设置」里换）
+~/.dsh/dsh-my-memory/            默认数据根（可以在「全局设置」里换）
   baby/agent.md                  一个角色一个目录，目录名 = 角色 id
   cat/agent.md
   state/personas.json            { "activeId": "baby" } 当前用哪个角色
@@ -106,7 +106,11 @@ soul-md 是 `memory_append / read / search / rewrite`），但语义重叠会让
   persona.md                     更早版本的单卡文件（迁移后保留不删）
   personas/                      上一版「一卡一 md」目录（迁移后只删空目录）
 
-~/.dsh/my-memory.roots.json      { "dataDir": "D:/xxx/my-memory" } 数据根指针
+~/.dsh/my-memory.roots.json      { "dataDir": "D:/xxx/dsh-my-memory" } 数据根指针
+
+> 默认根以前叫 `~/.dsh/my-memory`（少了 dsh）。启动时若旧目录在、新目录不在 →
+> `rename` 整个搬过去，并把指向旧路径的指针改到新路径；搬不动（跨盘/被占用）
+> 就继续用旧目录并 warn，绝不让插件起不来。
 ```
 
 `slug` = 仓库目录名 + `-` + 仓库根路径 sha1 前 6 位，例如 `dsh-my-memory-3f9a2c`。
@@ -255,19 +259,26 @@ tags: ["插件","api"]
 | POST | `/personas/:id/rename` | 重命名磁盘上的角色目录 `{ dir }` → 卡对象（`id`/`display` 已是新目录）；整个目录一起搬（头像等一并跟着走）；同名幂等、重名 400「这个目录已经有了」、非法名 400、源不存在 404，active 时 activeId 跟着改 |
 | GET | `/persona` | 兼容旧面板：等价「返回 active 那张卡」`{ name, body, updated }` |
 | PUT | `/persona` | 兼容旧面板：等价「保存 active 那张卡」 |
-| GET | `/settings` | `{ dataDir, defaultDataDir }` |
-| POST | `/settings/dataDir` | 切换数据根 `{ path }` → `{ ok:true, dataDir, movedFrom }`；空值/等于默认 = 回默认根；不迁数据 |
+| GET | `/settings` | `{ dataDir, defaultDataDir, folderName }`（`folderName` = `dsh-my-memory`，客户端显示用） |
+| GET | `/settings/picker` | `{ supported }`：宿主有没有系统文件夹选择能力（只探测，不弹框） |
+| POST | `/settings/dataDir` | 切换数据根 `{ parent }`（或兼容的 `{ path }`）→ `{ ok:true, dataDir, movedFrom }`；父目录会自动补一层 `dsh-my-memory`（已带则不重复拼）；空值 = 回默认根；不迁数据 |
 | POST | `/settings/reveal` | 用文件管理器打开当前数据目录 → `{ ok:true, path }` |
 | GET | `/memory?scope=global\|project&project=<cwd\|slug>` | 条目列表（`id/scope/summary/text/date/tags`） |
 | POST | `/memory` | 新增 `{ text, title?, scope?, project?, tags? }` |
 | DELETE | `/memory/:id` | 删除；不存在返回 404 + 明确错误 |
-| GET | `/memory/raw?scope=global` | 全局记忆文件原文 `{ scope, path, text }` |
-| PUT | `/memory/raw` | 原子写回原文 `{ scope:'global', text }` → `{ ok:true, path, text }`；允许空串 |
+| GET | `/memory/raw?scope=global` | 全局记忆原文 `{ scope, path, text, rev }`；`rev` = `sha1(内容)` 前 12 位 |
+| PUT/POST | `/memory/raw` | 带版本号写回 `{ scope:'global', text, baseRev?, force? }`：`baseRev` 与磁盘一致 → `{ ok:true, path, text, rev }`；不一致 → **409** `{ error:'磁盘上的内容已经变了', conflict:true, rev, text, baseRev }`（`text` 是磁盘当前全文，界面拿它出 diff）且**绝不写盘**；`baseRev` 缺省或 `force:true` → 直接写 |
 | GET | `/status` | 数据目录、条目数、当前项目 slug |
 | GET | `/health` | `{ ok: true, dataDir }` |
 
 `PUT /memory/raw` **不校验格式**（用户可能手写一半就先存），写完让注入段的 mtime 缓存失效，
 下一轮就是新内容；结构写坏的后果只是「这份读不出条目」，插件不会报错。
+
+**并发怎么保证不丢**：`rev` 是内容哈希（不是 mtime —— mtime 的分辨率和缓存都会骗人）。
+「读磁盘 → 比对 rev → 写」三步全在**同一把按路径排队的锁**里完成（`atomic.js` 的写队列，
+`appendGlobal` / `forgetGlobal` / 整份保存共用它）；比较放在锁外的话，两个并发保存会同时
+通过检查再先后写，后写的静默覆盖前一个。写完还会**回读校验**，不一致直接 500 报错，
+不假装成功。
 
 路由用宿主原生的 `ctx.webServer.register({ kind: 'prefix', path, handler })`，
 handler 直接吃 `(req, res)`（pathname 的 prefix 部分在 handler 里自己裁掉），**不引 express/koa**。
@@ -277,7 +288,7 @@ handler 直接吃 `(req, res)`（pathname 的 prefix 部分在 handler 里自己
 ## 7. 开发
 
 ```bash
-node --test test/        # 69 个用例：store / personas（目录+迁移+数据根）/ project / 插件接线
+node --test test/        # 83 个用例：store / personas（目录+迁移+数据根）/ project / 插件接线
 ```
 
 - `lib/host/index.js` —— 插件入口：Config、注入、段、工具、命令、HTTP

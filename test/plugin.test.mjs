@@ -4,11 +4,12 @@
 // handler 形状）照样测不出来，而那正是最容易让插件「加载成功但什么都不生效」的地方。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, writeFile, readFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, stat, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { apply, Config, inject, looksTechnical, name, retainEnds, revealCommandOf } from '../lib/host/index.js';
+import { contentRev } from '../lib/host/store.js';
 import { clearDetectCache } from '../lib/host/project.js';
 import { clearSyncCache } from '../lib/host/atomic.js';
 
@@ -728,7 +729,16 @@ async function withSandboxHome(run) {
     else process.env.HOME = saved.HOME;
     if (saved.USERPROFILE === undefined) delete process.env.USERPROFILE;
     else process.env.USERPROFILE = saved.USERPROFILE;
-    await rm(sandbox, { recursive: true, force: true });
+    // 插件的启动引导是异步的（建默认卡/写索引），清理时它可能还在写 ——
+    // Windows 上这时候 rm 会 EBUSY/ENOTEMPTY，所以小退避重试几次。
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      try {
+        await rm(sandbox, { recursive: true, force: true });
+        break;
+      } catch {
+        await new Promise((r) => setTimeout(r, 40));
+      }
+    }
   }
 }
 
@@ -738,7 +748,9 @@ test('HTTP · settings：读当前/默认数据根', async () => {
     const res = await api('GET', '/settings');
     assert.equal(res.status, 200);
     assert.equal(res.body.dataDir, dir);
-    assert.ok(res.body.defaultDataDir.endsWith(join('.dsh', 'my-memory')), res.body.defaultDataDir);
+    // 默认根带 dsh 前缀（跟包名一致）
+    assert.ok(res.body.defaultDataDir.endsWith(join('.dsh', 'dsh-my-memory')), res.body.defaultDataDir);
+    assert.equal(res.body.folderName, 'dsh-my-memory');
   } finally {
     ctx.state.effects.forEach((d) => typeof d === 'function' && d());
     await rm(dir, { recursive: true, force: true });
@@ -747,12 +759,14 @@ test('HTTP · settings：读当前/默认数据根', async () => {
 
 test('HTTP · settings：切到新目录后新角色落到新目录，指针文件同步', async () => {
   const { ctx, api, dir } = await startPlugin();
-  const next = await mkdtemp(join(tmpdir(), 'dsh-my-memory-next-'));
+  const parent = await mkdtemp(join(tmpdir(), 'mm-parent-'));
+  const next = join(parent, 'dsh-my-memory');
   try {
-    const switched = await api('POST', '/settings/dataDir', { path: next });
+    // 传 parent：宿主自己补固定子目录名
+    const switched = await api('POST', '/settings/dataDir', { parent });
     assert.equal(switched.status, 200);
     assert.equal(switched.body.ok, true);
-    assert.equal(switched.body.dataDir, next);
+    assert.equal(switched.body.dataDir, next, '传父目录时自动补上 dsh-my-memory');
     assert.equal(switched.body.movedFrom, dir, '要告诉界面从哪搬过来的（界面提示一句）');
 
     // 新根自动初始化（建了默认卡），旧根的卡不会出现在列表里
@@ -778,21 +792,22 @@ test('HTTP · settings：切到新目录后新角色落到新目录，指针文�
   } finally {
     ctx.state.effects.forEach((d) => typeof d === 'function' && d());
     await rm(dir, { recursive: true, force: true });
-    await rm(next, { recursive: true, force: true });
+    await rm(parent, { recursive: true, force: true });
   }
 });
 
 test('HTTP · settings：path 为空切回默认根，并清掉指针', async () => {
   await withSandboxHome(async (sandbox) => {
     const { ctx, api, dir } = await startPlugin();
-    const other = await mkdtemp(join(tmpdir(), 'dsh-my-memory-other-'));
+    const otherParent = await mkdtemp(join(tmpdir(), 'mm-other-'));
+    const other = join(otherParent, 'dsh-my-memory');
     try {
-      await api('POST', '/settings/dataDir', { path: other });
+      await api('POST', '/settings/dataDir', { parent: otherParent });
       assert.equal(JSON.parse(await readFile(join(dir, '.roots.json'), 'utf8')).dataDir, other);
 
       const back = await api('POST', '/settings/dataDir', { path: '' });
       assert.equal(back.status, 200);
-      assert.equal(back.body.dataDir, join(sandbox, '.dsh', 'my-memory'), '空值 = 回到默认根');
+      assert.equal(back.body.dataDir, join(sandbox, '.dsh', 'dsh-my-memory'), '空值 = 回到默认根');
       assert.equal(back.body.movedFrom, other);
       // 指针清空（null = 没有覆盖，用默认）
       assert.deepEqual(JSON.parse(await readFile(join(dir, '.roots.json'), 'utf8')), { dataDir: null });
@@ -800,7 +815,7 @@ test('HTTP · settings：path 为空切回默认根，并清掉指针', async ()
     } finally {
       ctx.state.effects.forEach((d) => typeof d === 'function' && d());
       await rm(dir, { recursive: true, force: true });
-      await rm(other, { recursive: true, force: true });
+      await rm(otherParent, { recursive: true, force: true });
     }
   });
 });
@@ -820,6 +835,161 @@ test('HTTP · settings：目录建不出来时 400（不让一个坏路径把插
     ctx.state.effects.forEach((d) => typeof d === 'function' && d());
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('HTTP · PUT /memory/raw：rev 与 409 冲突（含并发、force、外部改写）', async () => {
+  const { ctx, api, dir } = await startPlugin();
+  try {
+    clearSyncCache();
+    const first = await api('GET', '/memory/raw?scope=global');
+    assert.equal(first.status, 200);
+    assert.match(String(first.body.rev), /^[0-9a-f]{12}$/);
+    assert.equal(first.body.text, '');
+
+    // baseRev 正确 → 写成功，rev 更新
+    const text = '# 全局记忆\n\n## 称呼\n\n- [g_1a2b3c4d] 2026-11-07 主人叫我大肥鱼\n';
+    const ok = await api('PUT', '/memory/raw', { scope: 'global', text, baseRev: first.body.rev });
+    assert.equal(ok.status, 200);
+    assert.equal(ok.body.ok, true);
+    assert.equal(ok.body.text, text);
+    assert.notEqual(ok.body.rev, first.body.rev);
+    assert.equal(ok.body.rev, contentRev(text));
+
+    // baseRev 过期 → 409 + 磁盘全文，且文件没被改
+    const stale = await api('PUT', '/memory/raw', { scope: 'global', text: '# 我的\n', baseRev: first.body.rev });
+    assert.equal(stale.status, 409);
+    assert.equal(stale.body.conflict, true);
+    assert.equal(stale.body.error, '磁盘上的内容已经变了');
+    assert.equal(stale.body.text, text);
+    assert.equal(stale.body.rev, contentRev(text));
+    assert.equal(await readFile(join(dir, 'MEMORY.md'), 'utf8'), text);
+
+    // POST 等价于 PUT
+    const viaPost = await api('POST', '/memory/raw', { scope: 'global', text: '# POST 写的\n', baseRev: stale.body.rev });
+    assert.equal(viaPost.status, 200);
+
+    // force → 无视 baseRev
+    const forced = await api('PUT', '/memory/raw', { scope: 'global', text: '# 强制覆盖\n', baseRev: 'deadbeef', force: true });
+    assert.equal(forced.status, 200);
+    assert.equal(await readFile(join(dir, 'MEMORY.md'), 'utf8'), '# 强制覆盖\n');
+
+    // 老客户端：不带 baseRev 直接写（不能坏）
+    const legacy = await api('PUT', '/memory/raw', { scope: 'global', text: '# 老界面\n' });
+    assert.equal(legacy.status, 200);
+
+    // 外部编辑器改盘后再用旧 rev 写 → 409
+    const seen = await api('GET', '/memory/raw?scope=global');
+    await writeFile(join(dir, 'MEMORY.md'), '# 外部改的\n', 'utf8');
+    const conflict = await api('PUT', '/memory/raw', { scope: 'global', text: '# 我\n', baseRev: seen.body.rev });
+    assert.equal(conflict.status, 409);
+    assert.equal(conflict.body.text, '# 外部改的\n');
+    assert.equal(await readFile(join(dir, 'MEMORY.md'), 'utf8'), '# 外部改的\n');
+  } finally {
+    ctx.state.effects.forEach((d) => typeof d === 'function' && d());
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('HTTP · PUT /memory/raw 并发：同一 baseRev 两个请求 → 一个 200 一个 409', async () => {
+  const { ctx, api, dir } = await startPlugin();
+  try {
+    clearSyncCache();
+    const base = (await api('GET', '/memory/raw?scope=global')).body.rev;
+    const [a, b] = await Promise.all([
+      api('PUT', '/memory/raw', { scope: 'global', text: '# 甲\n', baseRev: base }),
+      api('PUT', '/memory/raw', { scope: 'global', text: '# 乙\n', baseRev: base }),
+    ]);
+    const codes = [a.status, b.status].sort();
+    assert.deepEqual(codes, [200, 409], '恰好一个成功、一个冲突');
+    const winner = a.status === 200 ? a : b;
+    assert.equal(await readFile(join(dir, 'MEMORY.md'), 'utf8'), winner.body.text);
+  } finally {
+    ctx.state.effects.forEach((d) => typeof d === 'function' && d());
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('HTTP · settings/picker：没有 directoryPicker 时 supported=false，有则 true', async () => {
+  const { ctx, api, dir } = await startPlugin();
+  try {
+    const none = await api('GET', '/settings/picker');
+    assert.equal(none.status, 200);
+    assert.deepEqual(none.body, { supported: false });
+
+    // 模拟宿主提供了选择框服务
+    const originGet = ctx.get;
+    ctx.get = (name) =>
+      name === 'directoryPicker' ? { capability: () => ({ kind: 'native' }) } : originGet.call(ctx, name);
+    const has = await api('GET', '/settings/picker');
+    assert.deepEqual(has.body, { supported: true });
+    ctx.get = originGet;
+  } finally {
+    ctx.state.effects.forEach((d) => typeof d === 'function' && d());
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('HTTP · settings：dataDir 传 parent 自动补子目录、已带子目录不重复拼', async () => {
+  const { ctx, api, dir } = await startPlugin();
+  const parent = await mkdtemp(join(tmpdir(), 'mm-parent2-'));
+  try {
+    const asParent = await api('POST', '/settings/dataDir', { parent });
+    assert.equal(asParent.status, 200);
+    assert.equal(asParent.body.dataDir, join(parent, 'dsh-my-memory'));
+
+    // 已经是 .../dsh-my-memory 结尾：不再拼一层
+    const already = await api('POST', '/settings/dataDir', { path: join(parent, 'dsh-my-memory') });
+    assert.equal(already.status, 200);
+    assert.equal(already.body.dataDir, join(parent, 'dsh-my-memory'));
+
+    // 老客户端传 { path } 且不是子目录名结尾 → 同样当父目录
+    const other = await mkdtemp(join(tmpdir(), 'mm-parent3-'));
+    const asPath = await api('POST', '/settings/dataDir', { path: other });
+    assert.equal(asPath.body.dataDir, join(other, 'dsh-my-memory'));
+    await rm(other, { recursive: true, force: true });
+  } finally {
+    ctx.state.effects.forEach((d) => typeof d === 'function' && d());
+    await rm(dir, { recursive: true, force: true });
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
+test('启动迁移：~/.dsh/my-memory → ~/.dsh/dsh-my-memory（含指针改写）', async () => {
+  await withSandboxHome(async (sandbox) => {
+    const legacy = join(sandbox, '.dsh', 'my-memory');
+    const target = join(sandbox, '.dsh', 'dsh-my-memory');
+    const pointer = join(sandbox, 'pointer.json');
+    await mkdir(join(legacy, 'baby'), { recursive: true });
+    await writeFile(join(legacy, 'baby', 'agent.md'), '---\nname: 老角色\ncreated: 1\nupdated: 1\n---\n\n老正文\n', 'utf8');
+    await writeFile(pointer, JSON.stringify({ dataDir: legacy }), 'utf8');
+
+    const ctx = makeCtx();
+    const cwd = join(sandbox, 'workspace');
+    await mkdir(cwd, { recursive: true });
+    ctx.workingDirectory = { get: () => cwd, defaultDirectory: cwd };
+    try {
+      // dataDir 留空 = 走默认根（才会触发默认目录迁移）；指针用临时文件
+      apply(ctx, { rootPointerFile: pointer });
+      assert.equal(await readFile(join(target, 'baby', 'agent.md'), 'utf8').then((t) => t.includes('老角色')), true);
+      // 旧目录搬走了
+      await assert.rejects(stat(legacy));
+      // 指针跟着改到新路径
+      await waitFor(async () => {
+        try {
+          return JSON.parse(await readFile(pointer, 'utf8')).dataDir === target;
+        } catch {
+          return false;
+        }
+      });
+      const route = ctx.state.routes[0];
+      const res = makeRes();
+      await route.handler(makeReq('GET', '/my-memory/api/personas'), res);
+      assert.equal(res.payload.items.length, 1);
+      assert.equal(res.payload.items[0].id, 'baby');
+    } finally {
+      ctx.state.effects.forEach((d) => typeof d === 'function' && d());
+    }
+  });
 });
 
 test('纯函数：revealCommandOf 按平台给出打开目录的命令', () => {
