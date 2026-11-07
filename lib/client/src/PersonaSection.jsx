@@ -1,73 +1,95 @@
 /**
- * PersonaSection.jsx —— 设置页「角色卡」
+ * PersonaSection.jsx —— 面板「角色设定」页
  *
- * 挂在 `settings.section`（kind=list，scope=root），只有一个角色卡，不做多角色。
- * 交互刻意做到最笨：改完点「保存」，不自动保存。
- * why：角色卡正文可能几千字，自动保存会在用户打字中途反复写盘，
- * 且写盘会 refresh 注入段——每敲一个字系统提示就变一次，KV 缓存全废。
+ * 只有两个输入框：名字、角色信息（正文）。别的行一个都不要。
+ * **没有保存按钮**：跟原插件一样失焦即存（onBlur）。
+ * why：角色卡是「写完就走」的东西，多一个保存按钮只会多一次「我改了半天好像没生效」；
+ * 另外原插件的保存按钮用品牌色实心填充 + 白字，主题里 brand 接近白时就是一个白块，
+ * 这个坑不再踩。
+ *
+ * 数据由父组件先读好传进来（persona），保存成功后通过 onSaved 回传，
+ * 这样左边那张卡的显示名能跟着变，不需要二次拉接口。
  */
 import * as React from 'react';
-import { fetchPersona, savePersona } from './api.js';
-import { ensureStyle } from './styles.js';
+import { savePersona } from './api.js';
 
-/** 「已保存」停留时长：够看清，又不至于一直挂在那儿宣布自己存过了 */
-const SAVED_FLASH_MS = 1800;
+/** 一行「标签 + 控件」，抄自原插件 UserProfileTab 的四个 SETTING_* 常量（照抄值，不 import 组件） */
+const SETTING_ROW_STYLE = { display: 'flex', alignItems: 'center', gap: 10, minHeight: 34 };
+const SETTING_LABEL_STYLE = {
+  flex: '0 0 72px',
+  minWidth: 0,
+  fontSize: 12.5,
+  fontWeight: 600,
+  color: 'var(--dsw-alias-label-primary, #e8ecf7)',
+};
+const SETTING_CONTROL_STYLE = {
+  flex: '1 1 auto',
+  minWidth: 0,
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+};
+const SETTING_CELL_STYLE = {
+  display: 'flex',
+  flexDirection: 'column',
+  justifyContent: 'center',
+  minWidth: 0,
+};
 
-export function PersonaSection() {
-  const [name, setName] = React.useState('');
-  const [body, setBody] = React.useState('');
-  const [loaded, setLoaded] = React.useState(false);
+/** 「已自动保存」停留时长 */
+const SAVED_FLASH_MS = 1600;
+
+/**
+ * @param {{persona?: {name?:string, body?:string}, onSaved?: (p:{name:string,body:string,updated:number})=>void}} props
+ */
+export function PersonaSection({ persona, onSaved } = {}) {
+  const [name, setName] = React.useState(String(persona?.name ?? ''));
+  const [body, setBody] = React.useState(String(persona?.body ?? ''));
   const [saving, setSaving] = React.useState(false);
   const [flash, setFlash] = React.useState('');
   const [err, setErr] = React.useState('');
-  /** 已落盘的基线：dirty = 当前值 != 基线，避免「改回来又变成干净」的判定错乱 */
-  const baseline = React.useRef({ name: '', body: '' });
+
+  /** 已落盘的基线：只拿来判断「这个字段到底变了没有」，避免光标进出就写一次盘 */
+  const baseline = React.useRef({ name: String(persona?.name ?? ''), body: String(persona?.body ?? '') });
+  /** 防重入用 ref：失焦可能连着触发，state 读到的还是旧值 */
+  const savingRef = React.useRef(false);
   const flashTimer = React.useRef(null);
 
-  React.useEffect(() => {
-    ensureStyle();
-    return () => {
+  React.useEffect(
+    () => () => {
       if (flashTimer.current) clearTimeout(flashTimer.current);
+    },
+    [],
+  );
+
+  /**
+   * 失焦自动保存。
+   * @param {{name?:string, body?:string}} patch 本次要提交的字段（其余沿用当前值）
+   */
+  async function autosave(patch) {
+    if (savingRef.current) return;
+    const next = {
+      name: patch.name !== undefined ? String(patch.name) : name,
+      body: patch.body !== undefined ? String(patch.body) : body,
     };
-  }, []);
+    // 没变就不写：宿主保存会 refresh 注入段，每改一次 prompt 前缀都变（KV 缓存全废）
+    if (next.name === baseline.current.name && next.body === baseline.current.body) return;
 
-  const load = React.useCallback(async () => {
-    try {
-      const persona = await fetchPersona();
-      const nextName = String(persona?.name ?? '');
-      const nextBody = String(persona?.body ?? '');
-      baseline.current = { name: nextName, body: nextBody };
-      setName(nextName);
-      setBody(nextBody);
-      setErr('');
-    } catch (e) {
-      setErr(`读取角色卡失败：${e?.message || e}`);
-    } finally {
-      // 无论成败都放行输入：读失败时用户还可以自己写一份存上去
-      setLoaded(true);
-    }
-  }, []);
-
-  React.useEffect(() => {
-    void load();
-  }, [load]);
-
-  const dirty = name !== baseline.current.name || body !== baseline.current.body;
-
-  async function onSubmit(event) {
-    event?.preventDefault?.();
-    if (saving) return;
+    savingRef.current = true;
     setSaving(true);
     setErr('');
     try {
-      const saved = await savePersona({ name, body });
-      // 宿主返回保存后的角色卡；名字可能被宿主做了 trim/兜底，用返回值回填基线才准确
-      const nextName = String(saved?.name ?? name);
-      const nextBody = String(saved?.body ?? body);
-      baseline.current = { name: nextName, body: nextBody };
-      setName(nextName);
-      setBody(nextBody);
-      setFlash('已保存');
+      const saved = await savePersona(next);
+      const stored = {
+        name: String(saved?.name ?? next.name),
+        body: String(saved?.body ?? next.body),
+      };
+      baseline.current = stored;
+      // 宿主会 trim 名字 / 空名兜底，用返回值回填，避免输入框和磁盘上的内容不一致
+      setName(stored.name);
+      setBody(stored.body);
+      onSaved?.({ ...stored, updated: Number(saved?.updated) || 0 });
+      setFlash('已自动保存');
       if (flashTimer.current) clearTimeout(flashTimer.current);
       flashTimer.current = setTimeout(() => {
         flashTimer.current = null;
@@ -76,57 +98,50 @@ export function PersonaSection() {
     } catch (e) {
       setErr(`保存失败：${e?.message || e}`);
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   }
 
   return (
-    <div className="dsh-mymem-root" data-dsh-plugin="my-memory" data-dsh-part="persona">
-      <form className="dsh-mymem-page" onSubmit={onSubmit}>
-        <div className="dsh-mymem-title">角色卡</div>
-        <div className="dsh-mymem-hint">
-          角色设定会原样注入到对话上下文，写什么就是什么——不会被改写、不会被总结、也不会被模型解释。
+    <>
+      <div style={SETTING_CELL_STYLE}>
+        <div style={SETTING_ROW_STYLE}>
+          <span style={SETTING_LABEL_STYLE} title="保存后显示在对话顶部">
+            名字
+          </span>
+          <div style={SETTING_CONTROL_STYLE}>
+            <input
+              className="dsh-mymem-input"
+              style={{ width: '100%' }}
+              value={name}
+              placeholder="角色名"
+              spellCheck={false}
+              onChange={(e) => setName(e.target.value)}
+              onBlur={() => void autosave({ name })}
+            />
+          </div>
         </div>
+      </div>
 
-        <label className="dsh-mymem-field">
-          <span className="dsh-mymem-label">名字</span>
-          <input
-            className="dsh-mymem-input"
-            type="text"
-            value={name}
-            placeholder="她怎么称呼自己"
-            spellCheck={false}
-            onChange={(e) => setName(e.target.value)}
-          />
-        </label>
+      <div className="dsh-mymem-hint">
+        改动会自动保存{saving ? ' · 保存中…' : flash ? ` · ${flash}` : ''}
+      </div>
 
-        <label className="dsh-mymem-field">
-          <span className="dsh-mymem-label">角色设定</span>
-          <textarea
-            className="dsh-mymem-textarea"
-            value={body}
-            placeholder={'我是谁、说话什么调子、在意什么、不要做什么……\n写在这里的每一句都会出现在系统提示里。'}
-            spellCheck={false}
-            onChange={(e) => setBody(e.target.value)}
-          />
-        </label>
+      {err ? <div className="dsh-mymem-error">{err}</div> : null}
 
-        {err ? <div className="dsh-mymem-error">{err}</div> : null}
-
-        <div className="dsh-mymem-actions">
-          <button
-            className={`dsh-mymem-btn${dirty && !saving ? ' dsh-mymem-btn--dirty' : ''}`}
-            type="submit"
-            disabled={saving || !loaded}
-          >
-            {saving ? '保存中…' : '保存'}
-          </button>
-          {flash ? <span className="dsh-mymem-ok">{flash}</span> : null}
-          {!flash && dirty ? <span className="dsh-mymem-hint">有改动未保存</span> : null}
-          <span className="dsh-mymem-spacer" />
-          <span className="dsh-mymem-hint">改动不会自动保存</span>
-        </div>
-      </form>
-    </div>
+      <label className="dsh-mymem-field">
+        <span className="dsh-mymem-label">角色信息</span>
+        <textarea
+          className="dsh-mymem-textarea"
+          rows={16}
+          value={body}
+          placeholder="随便写：她是谁、怎么说话、怎么称呼你……失焦自动保存"
+          spellCheck={false}
+          onChange={(e) => setBody(e.target.value)}
+          onBlur={() => void autosave({ body })}
+        />
+      </label>
+    </>
   );
 }
