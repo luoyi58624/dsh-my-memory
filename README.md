@@ -243,12 +243,11 @@ updated: 1762146000000
 当前项目从 `workingDirectory` 服务拿 cwd（`get(session)`），拿不到就退回
 `session.header.cwd`，再退回 `defaultDirectory`；全都拿不到时只注入全局部分，不报错。
 
-### 4.1 让某个预设「只留本插件的注入」（`./preset-solo`）
+### 4.1 让某个预设「工具更少」（`./preset-solo`）
 
-默认模式下上面两段是和官方提示段（`harness:identity`、`deployment:persona-prefix`、
-`ui:deliverable-file-references`、`harness:source`、`app:web-surface`）拼在一起的。
-如果某个 agent 预设（例如纯聊天的「聊天模式」）希望系统提示词**只剩**本插件注入的内容，
-在那个预设的 `plugins` 里挂一条本包的子路径导出即可：
+上面这些段是**根层正常注入**，所有预设共用；聊天模式不另做提示词，只是工具更少。
+想给某个 agent 预设（例如纯聊天的「聊天模式」）做工具可见性白名单，
+就在那个预设的 `plugins` 里挂一条本包的子路径导出即可：
 
 ```yaml
 - id: preset-chat
@@ -260,19 +259,22 @@ updated: 1762146000000
         name: '@local/dsh-my-memory/preset-solo'
 ```
 
-它只在这个预设的 agent 作用域里做三件事（机制全部来自 `dsh-system-prompt` 的 `assemble()`）：
+它只在这个预设的 agent 作用域里做**一件事**：`tools.restrict({ allow })` 工具白名单。
 
 | 做什么 | 为什么 |
 | --- | --- |
-| 注册**唯一**一个 `complete: true` 段，正文 = 角色卡段 + 记忆段（空段跳过） | `assemble()` 末尾把 `sections` 换成 `[completeSection]`，所有官方英文段被丢弃。同一作用域**只能有一个** complete 段，多一个直接组装失败 |
-| `suppressRuntimeContext()` | 去掉可选的 runtime-context 贡献（沙箱策略/审批策略/harness 源/Web 界面），那条 `Current runtime context…` 的 user 消息就不再产生 |
-| 用同名 `context` 把 `working-directory:current` 影子覆盖成空文本 | 它是 `required: true`，抑制器拦不住，而且 `refreshContext()` 会「补回 required」。同名覆盖后它既不在 required 集合里、文本也空，最终快照里一条 context 都没有 |
+| 注册一条 `tools.restrict({ allow })`，默认只留 dsh-im 的 6 个 IM 工具 | `working_directory`（根层）与 `load_workspace_dependencies`（桌面宿主硬挂）都是**全局注册**的工具，没有「按预设关掉」的配置项，只能在 agent 作用域里用 registry 的可见性过滤摘掉 |
+| 传给 `restrict()` 之前与「此刻已知的全局工具名」取交集 | `restrict()` 对未知工具名直接抛错，而默认清单故意多写了几个可能还没注册的 IM 工具名 |
+| 尊重 `config.allow` | 整体覆盖默认清单，方便用户在预设里换成自己的白名单 |
 
-两段的拼装函数通过服务 `myMemoryPrompt`（`{ personaText, contextText }`）从根层实例取，
-预设内插件不重复 new store（那会重复跑启动迁移、写出第二份状态文件）。服务缺失
-（`enabled: false`）时预设内段降级为空，不会让预设挂起。
+历史说明：它曾经用 `complete: true` 段独占整个系统提示词，并顺带 `suppressRuntimeContext()`、
+影子覆盖 `working-directory:current`。实测模型不遵守那套「一句多余的话都不要写」的要求，
+而且 `complete` 会把宿主的官方英文段整片顶掉，不划算，已全部放弃 ——
+聊天模式的提示词现在由根层正常注入（与标准模式同口径，只是工具更少）。
 
-这些都是**作用域级**的注册，标准模式等其它预设零影响。注意：预设声明只在**新建会话**时生效。
+服务 `myMemoryPrompt`（`{ personaText, contextText, promptRaw, personaRaw, memoryRaw }`）
+保留着，预留给需要提示词正文的消费方；当前没有默认消费者。
+这些注册都是**作用域级**的，标准模式等其它预设零影响。注意：预设声明只在**新建会话**时生效。
 
 ---
 
