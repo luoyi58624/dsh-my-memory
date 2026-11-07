@@ -215,8 +215,9 @@ test('记忆段：全局 + 项目索引合成，且内容不变时字节稳定�
   try {
     clearSyncCache();
     clearDetectCache();
-    // 造一个 git 仓库，让 cwd 被识别成项目
+    // 造一个 git 仓库，并打开当前目录的局部记忆开关（默认是关的）
     await mkdir(join(cwd, '.git'), { recursive: true });
+    await api('POST', '/project/state', { cwd, enabled: true });
     await api('POST', '/memory', { text: '主人叫我大肥鱼', title: '称呼', scope: 'global' });
     await api('POST', '/memory', {
       text: 'DSH 插件 Config 用 schemastery',
@@ -269,16 +270,17 @@ test('auto scope：有 git 仓库 + 技术细节 → 项目；否则全局', asy
     // 没有 .git：全部落全局
     const before = await api('POST', '/memory', { text: 'Config 里每个字段必须给 default' });
     assert.equal(before.body.scope, 'global');
-    // 有 .git：技术细节落项目
+    // 有 .git：技术细节落项目（现在写进 <cwd>/.dsh/MEMORY.md，且要先打开开关）
     await mkdir(join(cwd, '.git'), { recursive: true });
     clearDetectCache();
+    await api('POST', '/project/state', { cwd, enabled: true });
     const tech = await api('POST', '/memory', {
       text: 'Config 里每个字段必须给 default，否则校验会失败',
       title: 'Config 约定',
     });
     assert.equal(tech.body.scope, 'project');
-    assert.match(tech.body.path, /projects[\\/]workspace-[0-9a-f]{6}[\\/]p_[0-9a-f]{8}\.md$/);
-    // 有 .git 但内容不像技术细节：仍然落全局
+    assert.equal(tech.body.path, join(cwd, '.dsh', 'MEMORY.md'));
+        // 有 .git 但内容不像技术细节：仍然落全局
     const human = await api('POST', '/memory', { text: '主人喜欢喝冰美式，不加糖' });
     assert.equal(human.body.scope, 'global');
     // 显式 scope 优先于 auto
@@ -741,6 +743,145 @@ async function withSandboxHome(run) {
     }
   }
 }
+
+
+test('HTTP · 会话级角色绑定：首绑 / 换卡 409 / 同卡幂等 / 未知卡 404 / 注入用绑定的卡', async () => {
+  const { ctx, api, dir } = await startPlugin();
+  try {
+    await api('POST', '/personas', { dir: 'cat' });
+    // 先造两张内容可区分的卡
+    await api('PUT', '/personas/cat', { body: '我是猫。' });
+    const first = (await api('GET', '/personas')).body.items.find((i) => i.id === 'baby');
+    await api('PUT', '/personas/baby', { body: '我是默认那张。' });
+    // 默认卡是 baby；把 cat 设为 active 以便验证「会话绑定优先于 active」
+    await api('POST', '/personas/cat/default');
+    assert.ok(first);
+
+    // 未绑定时
+    const before = await api('GET', '/session/persona?session=sess-1');
+    assert.equal(before.status, 200);
+    assert.deepEqual(
+      { personaId: before.body.personaId, locked: before.body.locked },
+      { personaId: null, locked: false },
+    );
+
+    // 首绑
+    const bound = await api('POST', '/session/persona', { session: 'sess-1', personaId: 'baby' });
+    assert.equal(bound.status, 200);
+    assert.equal(bound.body.personaId, 'baby');
+    assert.equal(bound.body.locked, true);
+
+    // 换卡 → 409
+    const conflict = await api('POST', '/session/persona', { session: 'sess-1', personaId: 'cat' });
+    assert.equal(conflict.status, 409);
+    assert.equal(conflict.body.error, '会话已经建立，角色不能切换');
+
+    // 同卡再绑 → 200 幂等
+    const again = await api('POST', '/session/persona', { session: 'sess-1', personaId: 'baby' });
+    assert.equal(again.status, 200);
+
+    // 未知卡 → 404
+    const missing = await api('POST', '/session/persona', { session: 'sess-2', personaId: 'ghost' });
+    assert.equal(missing.status, 404);
+
+    // 注入用的是「会话绑定的卡」，不是 active（当前 active 是 cat）
+    const boundText = renderSection(ctx, 'my-memory:persona', {
+      agent: { session: { id: 'sess-1' } },
+    });
+    assert.ok(boundText.includes('我是默认那张。'), boundText);
+    assert.ok(!boundText.includes('我是猫。'));
+    // 没绑定的会话用 active（cat）
+    const activeText = renderSection(ctx, 'my-memory:persona', {
+      agent: { session: { id: 'other-session' } },
+    });
+    assert.ok(activeText.includes('我是猫。'));
+
+    // 绑定落盘位置
+    const sessions = JSON.parse(await readFile(join(dir, 'state', 'sessions.json'), 'utf8'));
+    assert.equal(sessions['sess-1'].personaId, 'baby');
+  } finally {
+    ctx.state.effects.forEach((d) => typeof d === 'function' && d());
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('HTTP · 局部记忆开关：默认关 / 打开建文件 / 关闭保留内容 / 关闭时写入被拒', async () => {
+  const { ctx, api, dir, cwd } = await startPlugin();
+  try {
+    const memoryPath = join(cwd, '.dsh', 'MEMORY.md');
+    const initial = await api('GET', `/project/state?cwd=${encodeURIComponent(cwd)}`);
+    assert.equal(initial.status, 200);
+    assert.equal(initial.body.cwd, cwd);
+    assert.equal(initial.body.memoryPath, memoryPath);
+    assert.equal(initial.body.exists, false);
+    assert.equal(initial.body.enabled, false, '没记录 + 文件不存在 → 默认关');
+
+    // 关着时写项目记忆 → 被拒（明确中文错误）
+    await mkdir(join(cwd, '.git'), { recursive: true });
+    clearDetectCache();
+    const denied = await api('POST', '/memory', {
+      text: 'Config 的默认值必须给',
+      scope: 'project',
+    });
+    assert.equal(denied.status, 400);
+    assert.equal(denied.body.error, '当前目录的局部记忆开关是关的，先打开再记');
+    await assert.rejects(readFile(memoryPath, 'utf8'), '被拒时不能建文件');
+
+    // 打开 → 建文件
+    const on = await api('POST', '/project/state', { cwd, enabled: true });
+    assert.equal(on.body.enabled, true);
+    assert.equal(on.body.exists, true);
+    assert.equal(await readFile(memoryPath, 'utf8'), '# 项目记忆\n');
+
+    // 记一条
+    const saved = await api('POST', '/memory', { text: 'Config 的默认值必须给', scope: 'project' });
+    assert.equal(saved.status, 200);
+    assert.equal(saved.body.path, memoryPath);
+    const withEntry = await readFile(memoryPath, 'utf8');
+
+    // 关闭 → 文件与内容原样
+    const off = await api('POST', '/project/state', { cwd, enabled: false });
+    assert.equal(off.body.enabled, false);
+    assert.equal(off.body.exists, true);
+    assert.equal(await readFile(memoryPath, 'utf8'), withEntry, '关闭后内容不能变');
+
+    // 关闭后注入段不含项目记忆，但全局照常
+    await api('POST', '/memory', { text: '全局那条', scope: 'global' });
+    const injected = renderSection(ctx, 'my-memory:context', {
+      agent: { session: { id: 's1' } },
+    });
+    assert.ok(injected.includes('全局那条'));
+    assert.ok(!injected.includes('Config 的默认值必须给'), '关掉后项目段不注入');
+
+    // 打开后又能注入
+    await api('POST', '/project/state', { cwd, enabled: true });
+    const injectedAgain = renderSection(ctx, 'my-memory:context', {
+      agent: { session: { id: 's1' } },
+    });
+    assert.ok(injectedAgain.includes('Config 的默认值必须给'));
+  } finally {
+    ctx.state.effects.forEach((d) => typeof d === 'function' && d());
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('HTTP · 局部记忆开关：没有记录但文件已存在 → 默认开着', async () => {
+  const { ctx, api, dir, cwd } = await startPlugin();
+  try {
+    await mkdir(join(cwd, '.dsh'), { recursive: true });
+    await writeFile(join(cwd, '.dsh', 'MEMORY.md'), '# 项目记忆\n\n## 约定\n\n- [p_1234abcd] 2026-11-07 早就记过的\n', 'utf8');
+    const state = await api('GET', `/project/state?cwd=${encodeURIComponent(cwd)}`);
+    assert.equal(state.body.exists, true);
+    assert.equal(state.body.enabled, true);
+    const list = await api('GET', `/memory?scope=project&project=${encodeURIComponent(cwd)}`);
+    assert.equal(list.body.items.length, 1);
+    assert.equal(list.body.items[0].id, 'p_1234abcd');
+    assert.equal(list.body.projectState.enabled, true);
+  } finally {
+    ctx.state.effects.forEach((d) => typeof d === 'function' && d());
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 
 test('HTTP · settings：读当前/默认数据根', async () => {
   const { ctx, api, dir } = await startPlugin();

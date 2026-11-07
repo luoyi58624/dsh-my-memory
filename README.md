@@ -99,12 +99,14 @@ soul-md 是 `memory_append / read / search / rewrite`），但语义重叠会让
   baby/agent.md                  一个角色一个目录，目录名 = 角色 id
   cat/agent.md
   state/personas.json            { "activeId": "baby" } 当前用哪个角色
+  state/sessions.json            会话 → 角色卡的绑定（建会话时选，之后锁死）
+  state/projects.json            哪些目录开着「局部记忆」的开关
   MEMORY.md                      全局记忆（单文件，只装通用/人相关内容）
-  projects/
-    <slug>/MEMORY.md             该项目局部记忆的主索引（一行一条摘要，用于注入）
-    <slug>/<entry-id>.md         单条局部记忆全文
+  projects/<slug>/…              **旧版**项目记忆（保留不删、不自动迁移，见下）
   persona.md                     更早版本的单卡文件（迁移后保留不删）
   personas/                      上一版「一卡一 md」目录（迁移后只删空目录）
+
+<项目 cwd>/.dsh/MEMORY.md         该项目的局部记忆（跟仓库一起走，不再是插件数据目录里的文件）
 
 ~/.dsh/my-memory.roots.json      { "dataDir": "D:/xxx/dsh-my-memory" } 数据根指针
 
@@ -157,29 +159,27 @@ updated: 1762146000000
 
 条目 id（`g_` + 8 位 hex）就在行首，便于精确删除。手写的说明行、注释行都会被忽略而不是让整份文件读不出来。
 
-### projects/&lt;slug&gt;/MEMORY.md（索引）
+### &lt;cwd&gt;/.dsh/MEMORY.md（项目局部记忆）
+
+格式与全局记忆完全相同（`## 小节` + 一行一条），只是 id 用 `p_`：
 
 ```markdown
-# 项目记忆 · dsh-my-memory
+# 项目记忆
 
-- [p_9f8e7d6c] DSH 插件 Config 用 schemastery，每个字段必须给 default（2026-11-07）
+## 约定
+
+- [p_9f8e7d6c] 2026-11-07 DSH 插件 Config 用 schemastery，每个字段必须给 default | tag: 插件
 ```
 
-索引是**派生数据**：被手动删掉、或被清空时，下次读取会扫描目录里的 `*.md` 自动重建
-（忽略 `MEMORY.md` 自己）。真数据永远在每个 `<entry-id>.md` 里。
+它跟着项目走（提交进仓库、换机器也在），不再是插件数据目录里的东西。
 
-### projects/&lt;slug&gt;/&lt;entry-id&gt;.md（全文）
+**开关**：每个目录的局部记忆可以单独开/关（`state/projects.json` 记着）。
+没有记录时**默认值 = 文件是否存在**：文件在 = 默认开，文件不在 = 默认关
+（免得插件在你随便打开过的目录里到处建 `.dsh`）。关掉只写状态，
+**绝不删文件、不删目录、不清空内容**；关着时写/删都会被拒，注入段也整段跳过（全局段照常）。
 
-```markdown
----
-id: p_9f8e7d6c
-title: DSH 插件 Config 用 schemastery
-created: 1762146000000
-tags: ["插件","api"]
----
-
-（正文，可以多行 Markdown）
-```
+**旧位置**：`~/.dsh/dsh-my-memory/projects/<slug>/` 是上一版的项目记忆，
+**保留不删、不自动迁移**（要不要搬由人决定）。`/project/state` 的 `hasLegacy` 会告诉界面「这里还有旧数据」。
 
 ---
 
@@ -189,8 +189,8 @@ tags: ["插件","api"]
 
 | 段名 | 段序 | 内容 |
 | --- | --- | --- |
-| `my-memory:persona` | `personaOrder`（1.1） | **activeId 那张卡**的正文，超预算截断加 `…` |
-| `my-memory:context` | `order`（1.2） | 全局记忆全文（头尾裁剪）+ 当前项目索引（头尾裁剪） |
+| `my-memory:persona` | `personaOrder`（1.1） | **当前会话绑定的卡**（没绑定才用 activeId），超预算截断加 `…` |
+| `my-memory:context` | `order`（1.2） | 全局记忆全文（头尾裁剪）+ 当前目录的局部记忆（头尾裁剪；开关关着就不注入） |
 
 角色卡段形如：
 
@@ -259,6 +259,10 @@ tags: ["插件","api"]
 | POST | `/personas/:id/rename` | 重命名磁盘上的角色目录 `{ dir }` → 卡对象（`id`/`display` 已是新目录）；整个目录一起搬（头像等一并跟着走）；同名幂等、重名 400「这个目录已经有了」、非法名 400、源不存在 404，active 时 activeId 跟着改 |
 | GET | `/persona` | 兼容旧面板：等价「返回 active 那张卡」`{ name, body, updated }` |
 | PUT | `/persona` | 兼容旧面板：等价「保存 active 那张卡」 |
+| GET | `/session/persona?session=<id>` | `{ sessionId, personaId, name, locked }`；没绑过 → `personaId:null, locked:false` |
+| POST | `/session/persona` | 绑定 `{ session, personaId }`；换卡 → **409**「会话已经建立，角色不能切换」；同卡幂等 200；未知卡 404 |
+| GET | `/project/state?cwd=<绝对路径>` | `{ cwd, memoryPath, exists, enabled, hasLegacy }` |
+| POST | `/project/state` | 开关 `{ cwd, enabled }`；打开顺手建文件，关闭**只写状态、不删不改** |
 | GET | `/settings` | `{ dataDir, defaultDataDir, folderName }`（`folderName` = `dsh-my-memory`，客户端显示用） |
 | GET | `/settings/picker` | `{ supported }`：宿主有没有系统文件夹选择能力（只探测，不弹框） |
 | POST | `/settings/dataDir` | 切换数据根 `{ parent }`（或兼容的 `{ path }`）→ `{ ok:true, dataDir, movedFrom }`；父目录会自动补一层 `dsh-my-memory`（已带则不重复拼）；空值 = 回默认根；不迁数据 |
@@ -288,7 +292,7 @@ handler 直接吃 `(req, res)`（pathname 的 prefix 部分在 handler 里自己
 ## 7. 开发
 
 ```bash
-node --test test/        # 83 个用例：store / personas（目录+迁移+数据根）/ project / 插件接线
+node --test test/        # 94 个用例：store / personas（目录+迁移+数据根）/ project / 插件接线
 ```
 
 - `lib/host/index.js` —— 插件入口：Config、注入、段、工具、命令、HTTP

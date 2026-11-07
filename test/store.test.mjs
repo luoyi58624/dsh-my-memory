@@ -276,18 +276,24 @@ test('forgetById: 按前缀分发到全局/项目，坏 id 直接返回未删除
   }
 });
 
-test('stats: 全局/项目条目数与数据目录', async () => {
+test('stats: 全局/项目条目数与数据目录（项目记忆在 cwd/.dsh/MEMORY.md）', async () => {
   const { dir, store } = await tempStore();
   try {
     const root = join(dir, 'repo-s');
     await mkdir(root, { recursive: true });
     await store.appendGlobal({ text: 'g1' });
-    await store.appendProject({ root, title: 'P1', body: 'p1' });
-    const slug = (await store.listProjectSlugs())[0];
-    const s = await store.stats(slug);
+    await store.setProjectMemoryState({ cwd: root, enabled: true });
+    await store.appendProjectMemory({ cwd: root, text: 'p1' });
+    const s = await store.stats({ cwd: root });
     assert.equal(s.dataDir, dir);
     assert.equal(s.globalCount, 1);
     assert.equal(s.projectCount, 1);
+    assert.equal(s.project.enabled, true);
+    assert.equal(s.project.memoryPath, join(root, '.dsh', 'MEMORY.md'));
+    // 没给 cwd 时项目部分是空的，但全局照旧
+    const noCwd = await store.stats({});
+    assert.equal(noCwd.globalCount, 1);
+    assert.equal(noCwd.projectCount, 0);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

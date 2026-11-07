@@ -1,202 +1,145 @@
 /**
- * MemoryTab.jsx —— 会话标签栏里的「记忆」视图
+ * MemoryTab.jsx —— 会话标签栏里的「记忆」页
  *
- * 挂在 `conversation.view`（kind=list，scope=session），与「对话 / 轨迹 / 上下文」同一排。
- * 只做两件事：看两边记忆（全局 / 当前项目）、往里加一条和删一条。
+ * 这一页只管**这个会话自己的局部记忆**（`<cwd>/.dsh/MEMORY.md`）：
+ *   顶部：当前会话绑定的角色名 + 「局部记忆」开关
+ *   内容：那份文件的原文，只读、等宽、pre-wrap、可滚动
  *
- * 关于「哪个项目」：浏览器侧拿不到会话 cwd，所以项目身份统一问宿主 /status 要
- * （宿主用自己的默认工作目录探测 git 仓库），拿到 slug 后再把它显式回传给 /memory。
- * 这样「顶部显示的项目」和「列表里的项目」一定是同一个，不会出现显示 A 项目却列出 B 项目的情况。
+ * 为什么这里不放全局记忆：面板里「长期记忆」页已经是全局那份（还能编辑），
+ * 这里再放一份全局的，等于同一份数据两个入口，用户根本分不清改的是哪个。
+ *
+ * 关闭开关的语义要写在脸上：**只是不再记录，已有内容不会被删**。
+ * 不写的话，关掉的人会以为记忆被清了。
  */
 import * as React from 'react';
-import { addMemory, deleteMemory, fetchMemory, fetchStatus } from './api.js';
+import { fetchSessionPersona, fetchProjectState, saveProjectState, fetchProjectRaw } from './api.js';
 import { ensureStyle } from './styles.js';
 
-const SCOPES = [
-  { key: 'global', label: '全局' },
-  { key: 'project', label: '项目' },
-];
+/** sessionId / cwd 都从 slot props 里尽力取（不同外壳版本字段不一样） */
+function sessionIdFromProps(props) {
+  return props?.session?.id || props?.sessionId || props?.session?.sessionId || props?.session?.session_id || null;
+}
+function cwdFromProps(props) {
+  return props?.session?.cwd || props?.cwd || props?.session?.workingDirectory || null;
+}
 
-export function MemoryTab() {
-  const [scope, setScope] = React.useState('global');
-  const [status, setStatus] = React.useState(null);
-  const [items, setItems] = React.useState([]);
-  const [loading, setLoading] = React.useState(false);
+export function MemoryTab(props) {
+  const sessionId = sessionIdFromProps(props);
+  const cwd = cwdFromProps(props);
+
+  const [persona, setPersona] = React.useState(null);
+  const [state, setState] = React.useState(null);
+  const [doc, setDoc] = React.useState(null);
+  const [loading, setLoading] = React.useState(true);
   const [busy, setBusy] = React.useState(false);
   const [err, setErr] = React.useState('');
-  const [notice, setNotice] = React.useState('');
-  const [draft, setDraft] = React.useState('');
-  /** 请求序号：切 tab / 连点刷新时只认最后一次响应，避免旧列表盖掉新列表 */
+  /** 请求序号：连点开关时只认最后一次响应 */
   const seq = React.useRef(0);
-
-  const projectSlug = status?.projectSlug || null;
-
-  const load = React.useCallback(async (nextScope) => {
-    const my = ++seq.current;
-    setLoading(true);
-    try {
-      const st = await fetchStatus();
-      if (my !== seq.current) return;
-      setStatus(st);
-      const slug = st.projectSlug;
-      // 没有项目（默认目录不在 git 仓库里）就别发项目请求：宿主那边同样会返回空，
-      // 白跑一趟还多一条「假错误」的风险。
-      if (nextScope === 'project' && !slug) {
-        setItems([]);
-        setErr('');
-        return;
-      }
-      const res = await fetchMemory({ scope: nextScope, project: slug });
-      if (my !== seq.current) return;
-      setItems(res.items);
-      setErr('');
-    } catch (e) {
-      if (my !== seq.current) return;
-      // 失败时保留旧列表不清空：红字说明问题，列表还能看，别把用户正在看的东西抹掉
-      setErr(`加载失败：${e?.message || e}`);
-    } finally {
-      if (my === seq.current) setLoading(false);
-    }
-  }, []);
 
   React.useEffect(() => {
     ensureStyle();
   }, []);
 
-  React.useEffect(() => {
-    void load(scope);
-  }, [load, scope]);
+  /** 读状态 + 原文（cwd 拿不到就不传，让宿主用默认目录，它自己认） */
+  const load = React.useCallback(async () => {
+    const my = ++seq.current;
+    setLoading(true);
+    try {
+      const st = await fetchProjectState(cwd);
+      if (my !== seq.current) return;
+      setState(st);
+      // 开关关着也读一次：内容还在，用户可以看看关了之后还剩什么
+      try {
+        const raw = await fetchProjectRaw(cwd);
+        if (my === seq.current) setDoc(raw);
+      } catch {
+        if (my === seq.current) setDoc({ path: '', text: '' });
+      }
+      setErr('');
+    } catch (e) {
+      if (my === seq.current) setErr(`读取失败：${e?.message || e}`);
+    } finally {
+      if (my === seq.current) setLoading(false);
+    }
+  }, [cwd]);
 
-  async function onAdd(event) {
-    event?.preventDefault?.();
-    const text = draft.trim();
-    if (!text || busy) return;
+  React.useEffect(() => {
+    void load();
+  }, [load]);
+
+  React.useEffect(() => {
+    let alive = true;
+    if (!sessionId) return undefined;
+    (async () => {
+      try {
+        const sp = await fetchSessionPersona(sessionId);
+        if (alive) setPersona(sp);
+      } catch {
+        // 没绑定角色不是错误，顶部显示「未绑定角色」即可
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [sessionId]);
+
+  const enabled = Boolean(state?.enabled);
+
+  /** 开关：开着就关、关着就开；关掉不删内容 */
+  async function toggle() {
+    if (busy || !state) return;
     setBusy(true);
     setErr('');
-    setNotice('');
     try {
-      await addMemory({
-        scope,
-        text,
-        ...(scope === 'project' && projectSlug ? { project: projectSlug } : {}),
-      });
-      setDraft('');
-      setNotice('记住啦');
-      await load(scope);
-      setTimeout(() => setNotice(''), 1500);
+      await saveProjectState(cwd, !enabled);
+      await load();
     } catch (e) {
-      setErr(`记下失败：${e?.message || e}`);
+      setErr(`切换失败：${e?.message || e}`);
     } finally {
       setBusy(false);
     }
   }
 
-  async function onDelete(id) {
-    setErr('');
-    try {
-      await deleteMemory(id);
-      // 乐观移除：列表只用来扫读，先去掉行再拉全量，手感更跟手
-      setItems((prev) => prev.filter((it) => it.id !== id));
-      await load(scope);
-    } catch (e) {
-      setErr(`删除失败：${e?.message || e}`);
-      await load(scope);
-    }
-  }
-
-  const scopeTitle = scope === 'global' ? '全局记忆' : `项目记忆 · ${status?.projectName || '当前项目'}`;
-  const emptyText =
-    scope === 'global'
-      ? '还没有记忆。让她记住点什么吧～'
-      : projectSlug
-        ? '这个项目还没有记忆。技术细节、坑、约定都可以记在这儿～'
-        : '当前目录不在 git 仓库里，没有项目记忆。';
+  const text = String(doc?.text ?? '');
+  const hasText = text.trim().length > 0;
 
   return (
-    <div className="dsh-mymem-root dsh-mymem-pane" data-dsh-plugin="my-memory" data-dsh-part="memory-tab">
+    <div className="dsh-mymem-root dsh-mymem-pane" data-dsh-plugin="my-memory" data-dsh-part="session-memory">
       <div className="dsh-mymem-head">
-        <span className="dsh-mymem-scope-name">{scopeTitle}</span>
-        <span className="dsh-mymem-datadir" title={status?.dataDir || ''}>
-          {status?.dataDir ? `数据目录 ${status.dataDir}` : ''}
-        </span>
+        <span className="dsh-mymem-scope-name">{persona?.name || '未绑定角色'}</span>
         <span className="dsh-mymem-spacer" />
-        <button
-          className="dsh-mymem-btn dsh-mymem-btn--ghost"
-          type="button"
-          disabled={loading}
-          onClick={() => void load(scope)}
-        >
-          {loading ? '刷新中…' : '刷新'}
-        </button>
-      </div>
-
-      <div className="dsh-mymem-seg" role="tablist" aria-label="记忆范围">
-        {SCOPES.map((s) => (
+        <span className="dsh-mymem-switch">
+          <span className="dsh-mymem-switch-label">局部记忆</span>
           <button
-            key={s.key}
-            className={`dsh-mymem-seg-btn${scope === s.key ? ' dsh-mymem-seg-btn--on' : ''}`}
             type="button"
-            role="tab"
-            aria-selected={scope === s.key}
-            onClick={() => setScope(s.key)}
+            role="switch"
+            aria-checked={enabled}
+            aria-label="局部记忆"
+            className="dsh-mymem-switch-track"
+            data-on={enabled ? '1' : '0'}
+            disabled={busy || loading || !state}
+            onClick={() => void toggle()}
           >
-            {s.label}
-            {status
-              ? ` ${s.key === 'global' ? status.globalCount : status.projectCount}`
-              : ''}
+            <span className="dsh-mymem-switch-thumb" />
           </button>
-        ))}
+        </span>
       </div>
-
-      {/* 全局记忆是每轮都注入的，塞技术细节会挤爆预算 —— 这句提示就放列表正上方 */}
-      {scope === 'global' ? (
-        <div className="dsh-mymem-hint">全局记忆只放「人相关、通用、和技术无关」的内容。</div>
-      ) : null}
 
       {err ? <div className="dsh-mymem-error">{err}</div> : null}
 
-      <div className="dsh-mymem-list">
-        {items.length === 0 ? (
-          <div className="dsh-mymem-empty">{loading ? '读取中…' : emptyText}</div>
+      <div className="dsh-mymem-local" data-off={enabled ? '0' : '1'}>
+        {hasText ? (
+          <pre className="dsh-mymem-raw-pre dsh-mymem-localpre">{text}</pre>
         ) : (
-          items.map((it) => (
-            <div className="dsh-mymem-item" key={it.id}>
-              <div className="dsh-mymem-item-main">
-                <div className="dsh-mymem-item-summary" title={it.summary}>
-                  {it.summary}
-                </div>
-                <div className="dsh-mymem-item-date">
-                  {it.date || '未知日期'}
-                  {it.title && it.title !== it.summary ? ` · ${it.title}` : ''}
-                </div>
-              </div>
-              <button
-                className="dsh-mymem-del"
-                type="button"
-                title="删掉这条"
-                aria-label="删掉这条"
-                onClick={() => void onDelete(it.id)}
-              >
-                ×
-              </button>
-            </div>
-          ))
+          <div className="dsh-mymem-empty">
+            {loading ? '读取中…' : enabled ? '还没有局部记忆' : '局部记忆已关闭'}
+          </div>
         )}
+        {/* 关了之后给一层遮罩，内容还在、只是变灰看不清 */}
+        {!enabled && hasText ? <div className="dsh-mymem-localmask">局部记忆已关闭</div> : null}
       </div>
 
-      <form className="dsh-mymem-compose" onSubmit={onAdd}>
-        <input
-          className="dsh-mymem-input"
-          type="text"
-          value={draft}
-          placeholder={scope === 'global' ? '记一条关于她的（偏好、称呼、忌讳…）' : '记一条这个项目的（约定、坑、命令…）'}
-          onChange={(e) => setDraft(e.target.value)}
-        />
-        <button className="dsh-mymem-btn" type="submit" disabled={busy || !draft.trim()}>
-          {busy ? '记着…' : '记一条'}
-        </button>
-        {notice ? <span className="dsh-mymem-ok">{notice}</span> : null}
-      </form>
+      <div className="dsh-mymem-hint">关闭只是不再记录，已有内容不会删除。</div>
     </div>
   );
 }

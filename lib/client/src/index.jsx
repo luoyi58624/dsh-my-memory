@@ -15,6 +15,7 @@
 import { MemoryPanel } from './Panel.jsx';
 import { MemorySidebarIcon } from './icon.jsx';
 import { MemoryTab } from './MemoryTab.jsx';
+import { HeroPersonaPicker } from './HeroPersonaPicker.jsx';
 import { ensureStyle } from './styles.js';
 
 export const name = 'my-memory';
@@ -162,4 +163,8 @@ export function apply(ctx) {
 
   // 2) 会话标签栏里的一页「记忆」：两个落点互不依赖，各自 try/catch
   registerSection(ctx, 'conversation.view', PANEL_ID, 40, () => '记忆', MemoryTab);
+
+  // 3) 新建会话页的角色选择（下拉菜单）。组件自己判断有没有 sessionId，
+  //    拿不到就整条不渲染 —— 这里的注册失败也只 warn，不影响前面两个落点。
+  registerSection(ctx, 'conversation.hero.options', 'my-memory-persona', 10, () => '角色', HeroPersonaPicker);
 }
