@@ -8,7 +8,7 @@ import { mkdtemp, mkdir, rm, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { apply, Config, inject, looksTechnical, name, retainEnds } from '../lib/host/index.js';
+import { apply, Config, inject, looksTechnical, name, retainEnds, revealCommandOf } from '../lib/host/index.js';
 import { clearDetectCache } from '../lib/host/project.js';
 import { clearSyncCache } from '../lib/host/atomic.js';
 
@@ -99,11 +99,12 @@ async function startPlugin(config = {}) {
   const cwd = config.cwd ?? join(dir, 'workspace');
   await mkdir(cwd, { recursive: true });
   ctx.workingDirectory = { get: () => cwd, defaultDirectory: cwd };
-  apply(ctx, { dataDir: dir, ...config });
-  // 启动引导是异步的（建目录 + 迁移/建默认卡 + 写 personas.json），等它落盘避免断言抢跑
+  // 指针文件也指到临时目录：绝不能因为跑测试就改掉用户真实的 ~/.dsh/my-memory.roots.json
+  apply(ctx, { dataDir: dir, rootPointerFile: join(dir, '.roots.json'), ...config });
+  // 启动引导是异步的（建目录 + 迁移/建默认卡 + 写 state/personas.json），等它落盘避免断言抢跑
   await waitFor(async () => {
     try {
-      const index = JSON.parse(await readFile(join(dir, 'personas.json'), 'utf8'));
+      const index = JSON.parse(await readFile(join(dir, 'state', 'personas.json'), 'utf8'));
       return !!(index && index.activeId);
     } catch {
       return false;
@@ -459,19 +460,22 @@ test('工具 schema：parameters 是 object 根的真实 JSON Schema（不是 de
 test('HTTP · 多角色卡：列表带 body / 新建 / 改名 / 改正文 / 设为默认', async () => {
   const { ctx, api, dir } = await startPlugin();
   try {
-    const created = await api('POST', '/personas', { name: '小猫娘' });
+    const created = await api('POST', '/personas', { dir: 'cat' });
     assert.equal(created.status, 200);
-    assert.match(created.body.id, /^p_[0-9a-f]{8}$/);
-    assert.equal(created.body.name, '小猫娘');
-    assert.equal(created.body.body, '我是 小猫娘。');
+    assert.equal(created.body.id, 'cat', 'id 就是目录名');
+    assert.equal(created.body.name, 'cat', '没给显示名时默认用目录名');
+    assert.equal(created.body.body, '我是 cat。');
     assert.ok(created.body.created > 0);
+    // 面板要显示位置：绝对路径 + 缩成 ~ 的展示形式
+    assert.equal(created.body.path, join(dir, 'cat', 'agent.md'));
+    assert.match(created.body.display, /agent\.md$/);
 
     const list = await api('GET', '/personas');
     assert.equal(list.status, 200);
     assert.ok(Array.isArray(list.body.items));
     // 界面的卡片预览要显示正文，所以列表必须带 body
     for (const item of list.body.items) {
-      for (const key of ['id', 'name', 'body', 'created', 'updated']) {
+      for (const key of ['id', 'name', 'body', 'created', 'updated', 'path', 'display']) {
         assert.ok(key in item, `GET /personas 的条目缺字段 ${key}`);
       }
     }
@@ -481,7 +485,7 @@ test('HTTP · 多角色卡：列表带 body / 新建 / 改名 / 改正文 / 设�
     const renamed = await api('PUT', `/personas/${created.body.id}`, { name: '小猫猫' });
     assert.equal(renamed.body.id, created.body.id);
     assert.equal(renamed.body.name, '小猫猫');
-    assert.equal(renamed.body.body, '我是 小猫娘。');
+    assert.equal(renamed.body.body, '我是 cat。');
 
     // 改正文
     const rewritten = await api('PUT', `/personas/${created.body.id}`, { body: '我是小猫猫。\n\n别凶我。' });
@@ -519,7 +523,8 @@ test('HTTP · 多角色卡：删除、只剩一张拒绝、未知 id 404', async
     assert.equal(refused.body.error, '至少保留一张角色卡');
 
     // 建第二张后就能删；删 active 时 activeId 自动改指剩下的
-    const second = (await api('POST', '/personas', { name: 'baby' })).body;
+    const second = (await api('POST', '/personas', { dir: 'cat2' })).body;
+    assert.equal(second.id, 'cat2');
     await api('POST', `/personas/${second.id}/default`);
     const removed = await api('DELETE', `/personas/${second.id}`);
     assert.equal(removed.status, 200);
@@ -593,14 +598,14 @@ test('命令 /persona：不带参数列卡，带参切默认', async () => {
   }
 });
 
-test('启动迁移：已有旧 persona.md → 自动生成 personas/ 并被注入段读到', async () => {
+test('启动迁移：已有旧 persona.md → 自动转成 <dir>/agent.md 并被注入段读到', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-my-memory-migrate-'));
   const ctx = makeCtx();
   const cwd = join(dir, 'workspace');
   await mkdir(cwd, { recursive: true });
   ctx.workingDirectory = { get: () => cwd, defaultDirectory: cwd };
   try {
-    // 旧版本留下的单卡文件（只有 name/updated 两字段）
+    // 更早的版本留下的单卡文件（只有 name/updated 两字段）
     await writeFile(
       join(dir, 'persona.md'),
       '---\nname: 大肥鱼\nupdated: 1762000000000\n---\n\n我是大肥鱼。\n说话要柔和。\n',
@@ -609,34 +614,150 @@ test('启动迁移：已有旧 persona.md → 自动生成 personas/ 并被注�
     apply(ctx, { dataDir: dir });
     await waitFor(async () => {
       try {
-        const index = JSON.parse(await readFile(join(dir, 'personas.json'), 'utf8'));
+        const index = JSON.parse(await readFile(join(dir, 'state', 'personas.json'), 'utf8'));
         return !!(index && index.activeId);
       } catch {
         return false;
       }
     });
-    const index = JSON.parse(await readFile(join(dir, 'personas.json'), 'utf8'));
-    assert.match(index.activeId, /^p_[0-9a-f]{8}$/);
-    const cardText = await readFile(join(dir, 'personas', `${index.activeId}.md`), 'utf8');
-    assert.ok(cardText.includes('id: ' + index.activeId));
+    const index = JSON.parse(await readFile(join(dir, 'state', 'personas.json'), 'utf8'));
+    // 中文名猜不出合法目录名 → 用 baby
+    assert.equal(index.activeId, 'baby');
+    const cardText = await readFile(join(dir, 'baby', 'agent.md'), 'utf8');
     assert.ok(cardText.includes('name: 大肥鱼'));
     assert.ok(cardText.includes('created: 1762000000000'));
+    assert.ok(!cardText.includes('id:'), '新格式 frontmatter 不再写 id（目录名就是 id）');
     // 注入段立刻是迁移出来的那张卡
     const text = renderSection(ctx, 'my-memory:persona');
     assert.ok(text.includes('（角色卡「大肥鱼」）'));
     assert.ok(text.includes('说话要柔和。'));
-    // 旧文件还在
+    // 旧文件还在（迁移只复制，不删）
     assert.ok((await readFile(join(dir, 'persona.md'), 'utf8')).includes('说话要柔和'));
     // 接口上只有一张卡，且就是它
     const route = ctx.state.routes[0];
     const res = makeRes();
     await route.handler(makeReq('GET', '/my-memory/api/personas'), res);
     assert.equal(res.payload.items.length, 1);
-    assert.equal(res.payload.activeId, index.activeId);
+    assert.equal(res.payload.activeId, 'baby');
+    assert.equal(res.payload.items[0].path, join(dir, 'baby', 'agent.md'));
   } finally {
     ctx.state.effects.forEach((d) => typeof d === 'function' && d());
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+
+/** 临时把 HOME/USERPROFILE 指到沙箱：验证「切回默认根」时不碰真实家目录 */
+async function withSandboxHome(run) {
+  const sandbox = await mkdtemp(join(tmpdir(), 'dsh-my-memory-home-'));
+  const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  process.env.HOME = sandbox;
+  process.env.USERPROFILE = sandbox;
+  try {
+    return await run(sandbox);
+  } finally {
+    if (saved.HOME === undefined) delete process.env.HOME;
+    else process.env.HOME = saved.HOME;
+    if (saved.USERPROFILE === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = saved.USERPROFILE;
+    await rm(sandbox, { recursive: true, force: true });
+  }
+}
+
+test('HTTP · settings：读当前/默认数据根', async () => {
+  const { ctx, api, dir } = await startPlugin();
+  try {
+    const res = await api('GET', '/settings');
+    assert.equal(res.status, 200);
+    assert.equal(res.body.dataDir, dir);
+    assert.ok(res.body.defaultDataDir.endsWith(join('.dsh', 'my-memory')), res.body.defaultDataDir);
+  } finally {
+    ctx.state.effects.forEach((d) => typeof d === 'function' && d());
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('HTTP · settings：切到新目录后新角色落到新目录，指针文件同步', async () => {
+  const { ctx, api, dir } = await startPlugin();
+  const next = await mkdtemp(join(tmpdir(), 'dsh-my-memory-next-'));
+  try {
+    const switched = await api('POST', '/settings/dataDir', { path: next });
+    assert.equal(switched.status, 200);
+    assert.equal(switched.body.ok, true);
+    assert.equal(switched.body.dataDir, next);
+    assert.equal(switched.body.movedFrom, dir, '要告诉界面从哪搬过来的（界面提示一句）');
+
+    // 新根自动初始化（建了默认卡），旧根的卡不会出现在列表里
+    const list = await api('GET', '/personas');
+    assert.equal(list.body.items.length, 1);
+    assert.equal(list.body.items[0].path.startsWith(next), true);
+
+    // 新建角色落在新目录
+    const created = await api('POST', '/personas', { dir: 'cat' });
+    assert.equal(created.status, 200);
+    assert.equal(created.body.path, join(next, 'cat', 'agent.md'));
+    assert.equal(await readFile(join(next, 'cat', 'agent.md'), 'utf8').then((t) => t.includes('name: cat')), true);
+
+    // 全局记忆也写到新根
+    await api('POST', '/memory', { text: '切目录后的第一条', scope: 'global' });
+    assert.ok((await readFile(join(next, 'MEMORY.md'), 'utf8')).includes('切目录后的第一条'));
+
+    // 指针文件（测试里指到临时位置）记住新根
+    const pointer = JSON.parse(await readFile(join(dir, '.roots.json'), 'utf8'));
+    assert.equal(pointer.dataDir, next);
+    // GET /settings 反映最新
+    assert.equal((await api('GET', '/settings')).body.dataDir, next);
+  } finally {
+    ctx.state.effects.forEach((d) => typeof d === 'function' && d());
+    await rm(dir, { recursive: true, force: true });
+    await rm(next, { recursive: true, force: true });
+  }
+});
+
+test('HTTP · settings：path 为空切回默认根，并清掉指针', async () => {
+  await withSandboxHome(async (sandbox) => {
+    const { ctx, api, dir } = await startPlugin();
+    const other = await mkdtemp(join(tmpdir(), 'dsh-my-memory-other-'));
+    try {
+      await api('POST', '/settings/dataDir', { path: other });
+      assert.equal(JSON.parse(await readFile(join(dir, '.roots.json'), 'utf8')).dataDir, other);
+
+      const back = await api('POST', '/settings/dataDir', { path: '' });
+      assert.equal(back.status, 200);
+      assert.equal(back.body.dataDir, join(sandbox, '.dsh', 'my-memory'), '空值 = 回到默认根');
+      assert.equal(back.body.movedFrom, other);
+      // 指针清空（null = 没有覆盖，用默认）
+      assert.deepEqual(JSON.parse(await readFile(join(dir, '.roots.json'), 'utf8')), { dataDir: null });
+      assert.equal((await api('GET', '/settings')).body.dataDir, back.body.dataDir);
+    } finally {
+      ctx.state.effects.forEach((d) => typeof d === 'function' && d());
+      await rm(dir, { recursive: true, force: true });
+      await rm(other, { recursive: true, force: true });
+    }
+  });
+});
+
+test('HTTP · settings：目录建不出来时 400（不让一个坏路径把插件搞挂）', async () => {
+  const { ctx, api, dir } = await startPlugin();
+  try {
+    // 拿一个「父路径是文件」的路径：建目录必然失败
+    const blocker = join(dir, 'blocker');
+    await writeFile(blocker, 'x', 'utf8');
+    const res = await api('POST', '/settings/dataDir', { path: join(blocker, 'sub') });
+    assert.equal(res.status, 400);
+    assert.match(String(res.body.error), /目录创建失败|不可写/);
+    // 失败后仍然是原来的数据根
+    assert.equal((await api('GET', '/settings')).body.dataDir, dir);
+  } finally {
+    ctx.state.effects.forEach((d) => typeof d === 'function' && d());
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('纯函数：revealCommandOf 按平台给出打开目录的命令', () => {
+  assert.deepEqual(revealCommandOf('C:\\x', 'win32'), { command: 'explorer.exe', args: ['C:\\x'] });
+  assert.deepEqual(revealCommandOf('/x', 'darwin'), { command: 'open', args: ['/x'] });
+  assert.deepEqual(revealCommandOf('/x', 'linux'), { command: 'xdg-open', args: ['/x'] });
 });
 
 test('纯函数：retainEnds / looksTechnical 的可解释判据', () => {

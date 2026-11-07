@@ -50,19 +50,60 @@ function useDialog(onCancel, focusRef) {
 
 /**
  * 输入弹窗。
- * @param {{title:string, label?:string, defaultValue?:string, placeholder?:string, confirmText?:string,
- *          onOk:(value:string)=>void, onCancel:()=>void}} props
+ *
+ * onSubmit 允许抛错：抛出来的文案会显示在弹窗里、**弹窗保持打开**。
+ * 这点很关键 —— 宿主返回 400（目录重名、名字非法）时如果弹窗直接关掉，
+ * 用户只会看到「点了没反应」。
+ *
+ * @param {{title:string, description?:string, label?:string, defaultValue?:string, placeholder?:string,
+ *          confirmText?:string, validate?:(value:string)=>string, allowEmpty?:boolean,
+ *          onSubmit?:(value:string)=>Promise<void>|void, onCancel:()=>void}} props
  */
-export function PromptDialog({ title, label, defaultValue = '', placeholder, confirmText = '确定', onOk, onCancel }) {
+export function PromptDialog({
+  title,
+  description,
+  label,
+  defaultValue = '',
+  placeholder,
+  confirmText = '确定',
+  validate,
+  allowEmpty = false,
+  onSubmit,
+  onCancel,
+}) {
   const [value, setValue] = React.useState(defaultValue);
+  const [err, setErr] = React.useState('');
+  const [busy, setBusy] = React.useState(false);
   const inputRef = React.useRef(null);
   useDialog(onCancel, inputRef);
 
-  const submit = () => {
-    const v = value.trim();
-    if (!v) return;
-    onOk?.(v);
-  };
+  const trimmed = value.trim();
+  // 校验实时跑：按钮是禁用的，但红字要说清「为什么不给点」
+  const invalid = trimmed && validate ? validate(trimmed) : '';
+  // allowEmpty：数据目录那种「留空 = 恢复默认」的字段，空值是合法输入，
+  // 不能拿「非空」当提交条件，否则用户永远点不动按钮。
+  const canSubmit = (allowEmpty || !!trimmed) && !invalid && !busy;
+
+  async function submit() {
+    if (!canSubmit) return;
+    // 空值 + allowEmpty 时不跑校验（校验函数通常假设有内容）
+    if (validate && trimmed) {
+      const bad = validate(trimmed);
+      if (bad) {
+        setErr(bad);
+        return;
+      }
+    }
+    setBusy(true);
+    setErr('');
+    try {
+      await onSubmit?.(trimmed);
+    } catch (e) {
+      setErr(String(e?.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   if (typeof document === 'undefined') return null;
   return ReactDOM.createPortal(
@@ -75,6 +116,7 @@ export function PromptDialog({ title, label, defaultValue = '', placeholder, con
     >
       <div className="dsh-mymem-modal" role="dialog" aria-modal="true">
         <div className="dsh-mymem-modal-title">{title}</div>
+        {description ? <div className="dsh-mymem-modal-message">{description}</div> : null}
         {label ? <div className="dsh-mymem-modal-label">{label}</div> : null}
         <input
           ref={inputRef}
@@ -82,20 +124,24 @@ export function PromptDialog({ title, label, defaultValue = '', placeholder, con
           value={value}
           placeholder={placeholder || ''}
           spellCheck={false}
-          onChange={(e) => setValue(e.target.value)}
+          onChange={(e) => {
+            setValue(e.target.value);
+            setErr('');
+          }}
           onKeyDown={(e) => {
             if (e.key === 'Enter') {
               e.preventDefault();
-              submit();
+              void submit();
             }
           }}
         />
+        {invalid || err ? <div className="dsh-mymem-modal-error">{err || invalid}</div> : null}
         <div className="dsh-mymem-modal-actions">
           <button className="dsh-mymem-btn dsh-mymem-btn--ghost" type="button" onClick={() => onCancel?.()}>
             取消
           </button>
-          <button className="dsh-mymem-btn" type="button" disabled={!value.trim()} onClick={submit}>
-            {confirmText}
+          <button className="dsh-mymem-btn" type="button" disabled={!canSubmit} onClick={() => void submit()}>
+            {busy ? '处理中…' : confirmText}
           </button>
         </div>
       </div>

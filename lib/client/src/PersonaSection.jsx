@@ -13,29 +13,6 @@
 import * as React from 'react';
 import { updatePersona } from './personas.js';
 
-/** 一行「标签 + 控件」，抄自原插件 UserProfileTab 的四个 SETTING_* 常量（照抄值，不 import 组件） */
-const SETTING_ROW_STYLE = { display: 'flex', alignItems: 'center', gap: 10, minHeight: 34 };
-const SETTING_LABEL_STYLE = {
-  flex: '0 0 72px',
-  minWidth: 0,
-  fontSize: 12.5,
-  fontWeight: 600,
-  color: 'var(--dsw-alias-label-primary, #e8ecf7)',
-};
-const SETTING_CONTROL_STYLE = {
-  flex: '1 1 auto',
-  minWidth: 0,
-  display: 'flex',
-  alignItems: 'center',
-  gap: 8,
-};
-const SETTING_CELL_STYLE = {
-  display: 'flex',
-  flexDirection: 'column',
-  justifyContent: 'center',
-  minWidth: 0,
-};
-
 /** 「已自动保存」停留时长 */
 const SAVED_FLASH_MS = 1600;
 
@@ -110,24 +87,20 @@ export function PersonaSection({ persona, onSaved } = {}) {
 
   return (
     <>
-      <div style={SETTING_CELL_STYLE}>
-        <div style={SETTING_ROW_STYLE}>
-          <span style={SETTING_LABEL_STYLE} title="保存后显示在对话顶部">
-            名字
-          </span>
-          <div style={SETTING_CONTROL_STYLE}>
-            <input
-              className="dsh-mymem-input"
-              style={{ width: '100%' }}
-              value={name}
-              placeholder="角色名"
-              spellCheck={false}
-              onChange={(e) => setName(e.target.value)}
-              onBlur={() => void autosave({ name })}
-            />
-          </div>
-        </div>
-      </div>
+      {/* 名字：上下排版（label 在上、输入框整行宽）。
+          名字只是**展示用的角色名**，改它不改目录名 —— 磁盘上的身份始终是目录。
+          旁边的 hint 说明这条区别，免得有人以为改名字会移动文件夹。 */}
+      <label className="dsh-mymem-field">
+        <span className="dsh-mymem-label">名字</span>
+        <input
+          className="dsh-mymem-input"
+          value={name}
+          placeholder="展示用的角色名（不改目录名）"
+          spellCheck={false}
+          onChange={(e) => setName(e.target.value)}
+          onBlur={() => void autosave({ name })}
+        />
+      </label>
 
       <div className="dsh-mymem-hint">
         改动会自动保存{saving ? ' · 保存中…' : flash ? ` · ${flash}` : ''}
