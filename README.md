@@ -85,6 +85,7 @@ soul-md 是 `memory_append / read / search / rewrite`），但语义重叠会让
 | `apiPrefix` | `/my-memory/api` | 面板 HTTP 前缀 |
 | `personaName` | `助手` | 没设置过角色卡时的默认名字（正文默认 `我是 助手。`） |
 | `recallLimit` | `8` | `memory_recall` 不传 limit 时的条数 |
+| `rootPointerFile` | 空 | 数据根指针文件路径；空 = `~/.dsh/my-memory.roots.json`（单测用它指到临时目录） |
 
 预算裁剪只做一件事：超出上限时**保留头尾**并在中间插入 `…（中段省略）…`。
 为什么不只留头部：记忆是「越新越重要」，只截头部等于永远读不到刚记住的东西。
@@ -94,25 +95,28 @@ soul-md 是 `memory_append / read / search / rewrite`），但语义重叠会让
 ## 3. 数据在哪、长什么样
 
 ```
-~/.dsh/my-memory/
-  personas/<id>.md               角色卡，一卡一文件（可新建/改名/删除/切换）
-  personas.json                  { "activeId": "baby" } 当前默认用哪张卡
-  persona.md                     旧版单卡文件（迁移后保留不删，人可能还想看）
+~/.dsh/my-memory/                默认数据根（可以在「全局设置」里换）
+  baby/agent.md                  一个角色一个目录，目录名 = 角色 id
+  cat/agent.md
+  state/personas.json            { "activeId": "baby" } 当前用哪个角色
   MEMORY.md                      全局记忆（单文件，只装通用/人相关内容）
   projects/
     <slug>/MEMORY.md             该项目局部记忆的主索引（一行一条摘要，用于注入）
     <slug>/<entry-id>.md         单条局部记忆全文
+  persona.md                     更早版本的单卡文件（迁移后保留不删）
+  personas/                      上一版「一卡一 md」目录（迁移后只删空目录）
+
+~/.dsh/my-memory.roots.json      { "dataDir": "D:/xxx/my-memory" } 数据根指针
 ```
 
 `slug` = 仓库目录名 + `-` + 仓库根路径 sha1 前 6 位，例如 `dsh-my-memory-3f9a2c`。
 目录名部分做过安全化（去掉 `\ / : * ? " < > |`、去尾点空格、截断 64 字）；
 Windows 上路径大小写不敏感，所以 slug 里的名字部分也统一小写，避免同一个仓库生出两个项目。
 
-### personas/&lt;id&gt;.md
+### &lt;dir&gt;/agent.md
 
 ```markdown
 ---
-id: p_1a2b3c4d
 name: 大肥鱼
 created: 1762146000000
 updated: 1762146000000
@@ -121,18 +125,20 @@ updated: 1762146000000
 （角色设定正文，原样保存、原样注入，不拆小节、不改写）
 ```
 
-卡 id 只在新建时生成一次，**改名不会改 id**（否则界面上的选择、URL、外部引用全会失效）：
+**目录名 = 角色 id，新建时输入的就是它，之后永不改变**；显示名（`name`）随时可改。
+目录名只能是英文、数字、点、下划线、短横线，1~40 位 —— 校验不过直接 400。
+`projects` / `state` / `personas` 是插件自己的目录，不能拿来当角色名；
+列表也只认「目录里有 `agent.md`」的文件夹，所以往数据根里放别的东西不会污染角色列表。
 
-- 名字是 ASCII 标识符（`baby` / `cat-2`）→ 直接用它（转小写，因为 Windows 文件名大小写不敏感）
-- 中文 / 带空格 / 空名字 → `p_` + 名字 sha1 前 8 位
-- 撞了已有 id → 追加 `-2`、`-3`
+### 迁移（三种历史布局，旧文件都不删）
 
-### 迁移
+1. `personas/<id>.md`（上一版一卡一文件）→ 复制成 `<id>/agent.md`；
+   搬完之后 `personas/` 若空了就删掉（非空说明旧 md 还在，保留）。
+2. 更早的单文件 `persona.md` → 只在「一张角色目录都没有」时转成 `baby/agent.md`
+   （中文名猜不出合法目录名就用 `baby`），created 沿用旧卡的 updated。
+3. 已经有 `<dir>/agent.md` 的，什么都不做（幂等，重复启动不会生出第二份，也不会覆盖）。
 
-启动时如果 `personas/` 不存在或为空、而旧的 `persona.md` 存在，就把它复制成
-`personas/<id>.md` 并写 `personas.json`（created 沿用旧卡的 updated）。
-**旧 `persona.md` 保留不删** —— 删了不可逆，而它只有几 KB。
-`activeId` 失效（卡被手删、json 被改坏）时回落到「排序第一张」（created 最早的那张），
+`activeId` 失效（目录被手删、json 被改坏）时回落到「排序第一张」（created 最早的那张），
 读列表时顺手把自愈结果写回磁盘；注入路径（同步）只算不写。
 
 ### MEMORY.md（全局）
@@ -239,13 +245,18 @@ tags: ["插件","api"]
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/personas` | `{ items: [{ id, name, body, created, updated }], activeId }`（**带 body**，界面要预览） |
-| POST | `/personas` | 新建 `{ name }` → 卡对象；正文默认 `我是 <name>。` |
-| PUT | `/personas/:id` | 保存 `{ name?, body? }` → 卡对象；id 不变 |
-| DELETE | `/personas/:id` | 删除 → `{ ok:true, activeId }`；只剩一张时 400 + `至少保留一张角色卡` |
+| GET | `/personas` | `{ items: [{ id, name, body, created, updated, path, display }], activeId }`；`id` = 目录名，`path` = agent.md 绝对路径，`display` = `~\.dsh\my-memory\baby\agent.md` |
+| POST | `/personas` | 新建 `{ dir }` → 卡对象；正文默认 `我是 <dir>。`、name 默认 dir；`dir` 非法 400「目录名只能用英文、数字、点、下划线、短横线」，已存在 400「这个目录已经有了」 |
+| PUT | `/personas/:id` | 保存 `{ name?, body? }` → 卡对象；id（目录名）永不改 |
+| DELETE | `/personas/:id` | 删除**整个角色目录** → `{ ok:true, activeId }`；只剩一张时 400「至少保留一张角色卡」 |
 | POST | `/personas/:id/default` | 设为默认 → `{ ok:true, activeId }` |
+| POST | `/personas/:id/reveal` | 用系统文件管理器打开**这个角色目录** → `{ ok:true, path }` |
+| POST | `/personas/:id/reload` | 重新从磁盘读这张卡（外部手改过 agent.md）→ 卡对象 |
 | GET | `/persona` | 兼容旧面板：等价「返回 active 那张卡」`{ name, body, updated }` |
 | PUT | `/persona` | 兼容旧面板：等价「保存 active 那张卡」 |
+| GET | `/settings` | `{ dataDir, defaultDataDir }` |
+| POST | `/settings/dataDir` | 切换数据根 `{ path }` → `{ ok:true, dataDir, movedFrom }`；空值/等于默认 = 回默认根；不迁数据 |
+| POST | `/settings/reveal` | 用文件管理器打开当前数据目录 → `{ ok:true, path }` |
 | GET | `/memory?scope=global\|project&project=<cwd\|slug>` | 条目列表（`id/scope/summary/text/date/tags`） |
 | POST | `/memory` | 新增 `{ text, title?, scope?, project?, tags? }` |
 | DELETE | `/memory/:id` | 删除；不存在返回 404 + 明确错误 |
@@ -265,7 +276,7 @@ handler 直接吃 `(req, res)`（pathname 的 prefix 部分在 handler 里自己
 ## 7. 开发
 
 ```bash
-node --test test/        # 51 个用例：store / personas / project / 插件接线
+node --test test/        # 64 个用例：store / personas（目录+迁移+数据根）/ project / 插件接线
 ```
 
 - `lib/host/index.js` —— 插件入口：Config、注入、段、工具、命令、HTTP
