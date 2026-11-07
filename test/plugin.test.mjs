@@ -544,6 +544,74 @@ test('HTTP · 多角色卡：删除、只剩一张拒绝、未知 id 404', async
   }
 });
 
+test('HTTP · rename：改目录名后 GET /personas 看到新 id 与 display，activeId 跟随', async () => {
+  const { ctx, api, dir } = await startPlugin();
+  try {
+    const created = await api('POST', '/personas', { dir: 'mycat' });
+    assert.equal(created.status, 200);
+    await api('POST', '/personas/mycat/default');
+    // 目录里放个额外文件，验证「整个目录搬」
+    await writeFile(join(dir, 'mycat', 'avatar.png'), 'x', 'utf8');
+
+    const renamed = await api('POST', '/personas/mycat/rename', { dir: 'fish' });
+    assert.equal(renamed.status, 200);
+    assert.equal(renamed.body.id, 'fish');
+    assert.equal(renamed.body.path, join(dir, 'fish', 'agent.md'));
+    assert.ok(renamed.body.display.endsWith('agent.md'));
+    assert.ok(renamed.body.display.includes('fish'));
+    assert.equal(renamed.body.name, 'mycat');
+    // 额外文件跟着搬走
+    assert.equal((await readFile(join(dir, 'fish', 'avatar.png'), 'utf8')), 'x');
+
+    // 列表里旧 id 消失、新 id 出现，display 也跟着变
+    const list = await api('GET', '/personas');
+    const ids = list.body.items.map((i) => i.id).sort();
+    assert.deepEqual(ids, ['baby', 'fish'], '默认卡 baby 还在，只改了 mycat 那张');
+    assert.equal(list.body.activeId, 'fish');
+    const fishCard = list.body.items.find((i) => i.id === 'fish');
+    assert.ok(fishCard.display.includes('fish'));
+    // active 卡注入段立刻指向改名后的那张（正文没变）
+    assert.ok(renderSection(ctx, 'my-memory:persona').includes('（角色卡「mycat」）'));
+  } finally {
+    ctx.state.effects.forEach((d) => typeof d === 'function' && d());
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('HTTP · rename：重名 400 / 非法目录名 400 / 源不存在 404 / 同名幂等', async () => {
+  const { ctx, api, dir } = await startPlugin();
+  try {
+    await api('POST', '/personas', { dir: 'baby' });
+    await api('POST', '/personas', { dir: 'cat' });
+
+    const dup = await api('POST', '/personas/baby/rename', { dir: 'cat' });
+    assert.equal(dup.status, 400);
+    assert.equal(dup.body.error, '这个目录已经有了');
+
+    const invalid = await api('POST', '/personas/baby/rename', { dir: '大肥鱼' });
+    assert.equal(invalid.status, 400);
+    assert.equal(invalid.body.error, '目录名只能用英文、数字、点、下划线、短横线');
+
+    const reserved = await api('POST', '/personas/baby/rename', { dir: 'state' });
+    assert.equal(reserved.status, 400);
+
+    const missing = await api('POST', '/personas/ghost/rename', { dir: 'x' });
+    assert.equal(missing.status, 404);
+    assert.match(String(missing.body.error), /找不到角色卡/);
+
+    // 同名幂等：200 + 原卡
+    const same = await api('POST', '/personas/baby/rename', { dir: 'baby' });
+    assert.equal(same.status, 200);
+    assert.equal(same.body.id, 'baby');
+
+    // 失败后两张卡都还在
+    assert.deepEqual((await api('GET', '/personas')).body.items.map((i) => i.id).sort(), ['baby', 'cat']);
+  } finally {
+    ctx.state.effects.forEach((d) => typeof d === 'function' && d());
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('HTTP · PUT /memory/raw 原子写回原文，读回一致且注入立刻生效', async () => {
   const { ctx, api, dir } = await startPlugin();
   try {

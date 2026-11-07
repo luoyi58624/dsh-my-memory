@@ -33,7 +33,7 @@ async function tempStore(options = {}) {
 }
 
 /** 手工造一个角色目录（模拟用户自己在磁盘上做的事） */
-async function makeCard(root, dir, { name, body, created = 1762146000000 }) {
+async function makeCard(root, dir, { name, body, created = 1762146000000 } = {}) {
   await mkdir(join(root, dir), { recursive: true });
   await writeFile(
     join(root, dir, AGENT_FILE),
@@ -294,6 +294,88 @@ test('删除：删整个目录；只剩一张拒绝；删 active 时 activeId �
     await assert.rejects(store.deletePersona('baby'), /至少保留一张角色卡/);
     await assert.rejects(store.deletePersona('ghost'), /找不到角色卡/);
     assert.equal((await readdir(dir)).filter((n) => n === 'baby').length, 1);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('重命名：连目录里的其他文件一起搬，activeId 跟着变', async () => {
+  const { dir, store } = await tempStore();
+  try {
+    await makeCard(dir, 'baby', { name: '大肥鱼', body: '我是大肥鱼。' });
+    // 用户自己在角色目录里放的东西
+    await writeFile(join(dir, 'baby', 'avatar.png'), 'fake-image', 'utf8');
+    await mkdir(join(dir, 'baby', 'notes'), { recursive: true });
+    await writeFile(join(dir, 'baby', 'notes', 'a.md'), '笔记', 'utf8');
+    await store.setActivePersona('baby');
+
+    const card = await store.renamePersona('baby', 'fish');
+    assert.equal(card.id, 'fish');
+    assert.equal(card.path, join(dir, 'fish', AGENT_FILE));
+    assert.equal(card.name, '大肥鱼', '显示名不变');
+    assert.ok(card.display.endsWith('agent.md'));
+
+    // 旧目录没了、新目录里东西齐全（整个目录搬，不是只搬 agent.md）
+    await assert.rejects(stat(join(dir, 'baby')));
+    assert.deepEqual((await readdir(join(dir, 'fish'))).sort(), ['agent.md', 'avatar.png', 'notes']);
+    assert.equal(await readFile(join(dir, 'fish', 'notes', 'a.md'), 'utf8'), '笔记');
+    // activeId 同步改了
+    assert.equal(JSON.parse(await readFile(join(dir, 'state', 'personas.json'), 'utf8')).activeId, 'fish');
+    assert.equal(store.readActivePersonaSync().id, 'fish');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('重命名：同名幂等、重名 400、非法名 400、源不存在 404', async () => {
+  const { dir, store } = await tempStore();
+  try {
+    await makeCard(dir, 'baby');
+    await makeCard(dir, 'cat');
+
+    // 同名：原样返回，不报错也不动磁盘
+    const same = await store.renamePersona('baby', 'baby');
+    assert.equal(same.id, 'baby');
+    assert.ok((await stat(join(dir, 'baby', AGENT_FILE))).isFile());
+
+    // 目标已存在
+    await assert.rejects(store.renamePersona('baby', 'cat'), (err) => {
+      assert.equal(err.status, 400);
+      assert.equal(err.message, '这个目录已经有了');
+      return true;
+    });
+    // 目标是个没有 agent.md 的普通目录，也不能覆盖
+    await mkdir(join(dir, 'plain'), { recursive: true });
+    await assert.rejects(store.renamePersona('baby', 'plain'), (err) => err.status === 400);
+
+    // 非法目录名 / 保留名
+    await assert.rejects(store.renamePersona('baby', '大肥鱼'), (err) => {
+      assert.equal(err.status, 400);
+      assert.match(err.message, /目录名只能用英文、数字、点、下划线、短横线/);
+      return true;
+    });
+    await assert.rejects(store.renamePersona('baby', 'state'), (err) => err.status === 400);
+
+    // 源不存在
+    await assert.rejects(store.renamePersona('ghost', 'x'), (err) => err.status === 404);
+
+    // 失败之后目录结构没被破坏
+    assert.deepEqual((await store.listPersonas()).items.map((i) => i.id).sort(), ['baby', 'cat']);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('重命名：非 active 那张不影响 activeId', async () => {
+  const { dir, store } = await tempStore();
+  try {
+    await makeCard(dir, 'baby', { created: 1000 });
+    await makeCard(dir, 'cat', { created: 2000 });
+    await store.setActivePersona('cat');
+    await store.renamePersona('baby', 'fish');
+    const index = JSON.parse(await readFile(join(dir, 'state', 'personas.json'), 'utf8'));
+    assert.equal(index.activeId, 'cat');
+    assert.deepEqual((await store.listPersonas()).items.map((i) => i.id).sort(), ['cat', 'fish']);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

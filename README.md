@@ -252,6 +252,7 @@ tags: ["插件","api"]
 | POST | `/personas/:id/default` | 设为默认 → `{ ok:true, activeId }` |
 | POST | `/personas/:id/reveal` | 用系统文件管理器打开**这个角色目录** → `{ ok:true, path }` |
 | POST | `/personas/:id/reload` | 重新从磁盘读这张卡（外部手改过 agent.md）→ 卡对象 |
+| POST | `/personas/:id/rename` | 重命名磁盘上的角色目录 `{ dir }` → 卡对象（`id`/`display` 已是新目录）；整个目录一起搬（头像等一并跟着走）；同名幂等、重名 400「这个目录已经有了」、非法名 400、源不存在 404，active 时 activeId 跟着改 |
 | GET | `/persona` | 兼容旧面板：等价「返回 active 那张卡」`{ name, body, updated }` |
 | PUT | `/persona` | 兼容旧面板：等价「保存 active 那张卡」 |
 | GET | `/settings` | `{ dataDir, defaultDataDir }` |
@@ -276,7 +277,7 @@ handler 直接吃 `(req, res)`（pathname 的 prefix 部分在 handler 里自己
 ## 7. 开发
 
 ```bash
-node --test test/        # 64 个用例：store / personas（目录+迁移+数据根）/ project / 插件接线
+node --test test/        # 69 个用例：store / personas（目录+迁移+数据根）/ project / 插件接线
 ```
 
 - `lib/host/index.js` —— 插件入口：Config、注入、段、工具、命令、HTTP

@@ -29,7 +29,7 @@ import {
   deletePersona,
   setDefaultPersona,
   revealPersona,
-  reloadPersona,
+  renamePersona,
 } from './personas.js';
 import { ensureStyle } from './styles.js';
 
@@ -186,22 +186,28 @@ export function MemoryPanel({ close } = {}) {
     });
   }
 
-  /** 「更新角色目录」：从磁盘重读，成功后刷新这张卡并提示 */
-  async function reloadCard(persona) {
-    setErr('');
-    try {
-      const fresh = await reloadPersona(persona.id);
-      setList((prev) =>
-        prev
-          ? { ...prev, items: prev.items.map((i) => (i.id === fresh.id ? { ...i, ...fresh } : i)) }
-          : prev,
-      );
-      // 编辑页自己存着一份草稿，光换 props 不会重读 —— 用 tick 让它整体重建
-      setReloadTick((t) => t + 1);
-      flash('已更新');
-    } catch (e) {
-      setErr(`更新失败：${e?.message || e}`);
-    }
+  /** 「更新角色目录」：弹窗改磁盘上的文件夹名（不是重读，也不是改显示名） */
+  function openRenameDir(persona) {
+    setDialog({
+      kind: 'renameDir',
+      persona,
+      onCancel: () => setDialog(null),
+      onSubmit: async (dir) => {
+        setErr('');
+        try {
+          const renamed = await renamePersona(persona.id, dir);
+          setDialog(null);
+          await load();
+          // 目录名就是 id，改完是另一张卡了 —— 直接选中新的那个
+          if (renamed?.id) setSelectedId(renamed.id);
+          flash('目录已更新');
+        } catch (e) {
+          // 重名 / 非法 / 源目录不存在：弹窗不关，错误显示在弹窗里
+          setErr(`更新目录失败：${String(e?.message || e)}`);
+          throw new Error(String(e?.message || e));
+        }
+      },
+    });
   }
 
   /** 右键菜单四项 */
@@ -219,7 +225,7 @@ export function MemoryPanel({ close } = {}) {
             await revealPersona(persona.id);
           }),
       },
-      { label: '更新角色目录', onClick: () => void reloadCard(persona) },
+      { label: '更新角色目录', onClick: () => openRenameDir(persona) },
       { label: '删除角色', onClick: () => openDelete(persona) },
     ];
   }
@@ -355,7 +361,7 @@ export function MemoryPanel({ close } = {}) {
                   // 数据目录切换后 key 变化 → 记忆页重新读一次原文
                   <GlobalMemoryPage key={`raw:${reloadTick}`} />
                 ) : selected ? (
-                  // key 里带 reloadTick：换卡或「更新角色目录」后整体重建，别把旧草稿带过来
+                  // key 里带 id：换卡 / 目录改名后整体重建，别把旧草稿带过来
                   <PersonaSection
                     key={`${selected.id}:${reloadTick}`}
                     persona={selected}
@@ -387,6 +393,20 @@ export function MemoryPanel({ close } = {}) {
           label="角色目录（只能英文、数字、点、下划线、短横线）"
           placeholder="例如 baby"
           confirmText="创建"
+          validate={(v) => (DIR_RE.test(v) ? '' : '只能用英文、数字、点、下划线、短横线，1~40 个字符')}
+          onSubmit={dialog.onSubmit}
+          onCancel={dialog.onCancel}
+        />
+      ) : null}
+
+      {dialog?.kind === 'renameDir' ? (
+        <PromptDialog
+          title="更新角色目录"
+          description="改的是磁盘上的角色文件夹名，英文、数字、点、下划线、短横线。"
+          label="角色目录"
+          defaultValue={dialog.persona.id || ''}
+          placeholder="例如 baby"
+          confirmText="更新"
           validate={(v) => (DIR_RE.test(v) ? '' : '只能用英文、数字、点、下划线、短横线，1~40 个字符')}
           onSubmit={dialog.onSubmit}
           onCancel={dialog.onCancel}
