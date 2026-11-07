@@ -151,6 +151,73 @@ function registerSidebarPanel(ctx, navigation) {
 }
 
 /**
+ * 会话标签栏那页：标签名 = **这个会话绑定的角色名**（老板定的：那一页叫「名字」）。
+ *
+ * 名字是运行期才知道的（要等会话和绑定信息拿到），而 slot 的 label 在注册时就固定了，
+ * 所以这里留一个模块级变量 + 重新注册：名字变了就把这一页 dispose 再 register 一次，
+ * 外壳才会去重新读 label()。
+ */
+let tabLabel = '记忆';
+let viewCtx = null;
+let viewStop = null;
+
+/** 会话页拿到角色名后回调这里，更新标签并让外壳重读 */
+export function setTabLabelName(name) {
+  const next = String(name || '').trim();
+  if (!next || next === tabLabel) return;
+  tabLabel = next;
+  if (!viewCtx || typeof viewStop !== 'function') return;
+  try {
+    viewStop();
+  } catch {
+    /* 摘旧的失败不影响重注册 */
+  }
+  try {
+    viewStop = viewCtx.slots.register(viewDescriptor(), MemoryTab);
+  } catch (err) {
+    console.warn(LOG, '重新注册会话页失败', err);
+  }
+}
+
+function viewDescriptor() {
+  return {
+    name: 'conversation.view',
+    id: PANEL_ID,
+    order: 40,
+    label: () => tabLabel,
+    inject: () => ({ onPersonaName: setTabLabelName }),
+  };
+}
+
+/** 注册会话标签栏那一页 */
+function registerView(ctx) {
+  try {
+    if (!ctx.slots || typeof ctx.slots.inject !== 'function') throw new Error('ctx.slots 不可用');
+    viewCtx = ctx;
+    ctx.effect(
+      () =>
+        ctx.slots.inject('conversation.view', () => {
+          viewStop = ctx.slots.register(viewDescriptor(), MemoryTab);
+          return () => {
+            try {
+              viewStop();
+            } catch {
+              /* 卸载不抛 */
+            }
+            viewStop = null;
+          };
+        }),
+      'my-memory.conversation.view',
+    );
+    console.info(LOG, '已注册会话页（标签名随后跟着角色名走）');
+    return true;
+  } catch (err) {
+    console.warn(LOG, '注册 conversation.view 失败（不影响其它入口）', err);
+    return false;
+  }
+}
+
+/**
  * 插件工厂。
  * @param {any} ctx cordis 上下文
  */
@@ -162,7 +229,7 @@ export function apply(ctx) {
   registerSidebarPanel(ctx, createNavigation(ctx));
 
   // 2) 会话标签栏里的一页「记忆」：两个落点互不依赖，各自 try/catch
-  registerSection(ctx, 'conversation.view', PANEL_ID, 40, () => '局部记忆', MemoryTab);
+  registerView(ctx);
 
   // 3) 新建会话页的角色选择（下拉菜单）。组件自己判断有没有 sessionId，
   //    拿不到就整条不渲染 —— 这里的注册失败也只 warn，不影响前面两个落点。

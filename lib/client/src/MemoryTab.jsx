@@ -73,7 +73,11 @@ export function MemoryTab(props) {
     (async () => {
       try {
         const sp = await fetchSessionPersona(sessionId);
-        if (alive) setPersona(sp);
+        if (alive) {
+          setPersona(sp);
+          // 标签名跟着角色名走（老板要的是这一页叫角色的名字，不是「记忆」）
+          if (sp?.name) props.onPersonaName?.(sp.name);
+        }
       } catch {
         // 没绑定角色不是错误，顶部显示「未绑定角色」即可
       }
