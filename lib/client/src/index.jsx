@@ -4,7 +4,7 @@
  * 落点（用同一个 id `my-memory` 把侧边栏入口和面板关联起来，外壳点图标时按 id 选中面板）：
  *   sidebar.panellist   list slot，id=my-memory，渲染 16px 图标
  *   main                keyed slot，key=my-memory，渲染面板
- *   conversation.view   list slot，id=my-memory，会话标签栏里的一页「记忆」
+ *   conversation.view   list slot，id=my-memory，会话标签栏里的一页「局部记忆」（只放这个会话的局部记忆）
  *
  * 为什么不再注册 settings.section：角色卡是「这个插件的核心」，不是一堆散装偏好里的一项，
  * 藏在设置第三个分节里没人会翻；放侧边栏入口 = 点图标就进面板，一步到位。
@@ -162,7 +162,7 @@ export function apply(ctx) {
   registerSidebarPanel(ctx, createNavigation(ctx));
 
   // 2) 会话标签栏里的一页「记忆」：两个落点互不依赖，各自 try/catch
-  registerSection(ctx, 'conversation.view', PANEL_ID, 40, () => '记忆', MemoryTab);
+  registerSection(ctx, 'conversation.view', PANEL_ID, 40, () => '局部记忆', MemoryTab);
 
   // 3) 新建会话页的角色选择（下拉菜单）。组件自己判断有没有 sessionId，
   //    拿不到就整条不渲染 —— 这里的注册失败也只 warn，不影响前面两个落点。
