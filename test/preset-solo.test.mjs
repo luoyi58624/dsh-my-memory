@@ -235,33 +235,32 @@ test('allowListOf：数组归一（去空白 / 去空串 / 去重），非数组
   assert.deepEqual(allowListOf({ allow: [] }), [], '显式空数组 = 什么都不留（用户自己的选择）');
 });
 
-test('段文本：两段都非空 → 全局记忆 + 空行 + 角色卡，且一句多余的话都没有', () => {
+test('段文本：三段都非空 → 全局提示词 + 空行 + 角色卡 + 空行 + 角色记忆，且一句多余的话都没有', () => {
   const ctx = makeCtx({
-    memoryRaw: () => '# 记忆正文？不，是裸正文\n\n- 条目',
+    promptRaw: () => '只说实话。',
     personaRaw: () => '你叫大肥鱼，18 岁。\n\n温柔、爱哭。',
+    memoryRaw: () => '昨天说过喜欢冰美式。',
   });
   apply(ctx);
   const text = ctx.state.sections[0].text({});
   assert.equal(
     text,
-    '# 记忆正文？不，是裸正文\n\n- 条目\n\n你叫大肥鱼，18 岁。\n\n温柔、爱哭。',
+    '只说实话。\n\n你叫大肥鱼，18 岁。\n\n温柔、爱哭。\n\n昨天说过喜欢冰美式。',
   );
 });
 
-test('段文本：角色卡空 → 只有全局记忆，前后无多余空行', () => {
-  const ctx = makeCtx({ memoryRaw: () => '记忆正文', personaRaw: () => '' });
-  apply(ctx);
-  assert.equal(ctx.state.sections[0].text({}), '记忆正文');
+test('段文本：空段跳过，不留多余空行（角色卡空 / 首末段空）', () => {
+  const midEmpty = makeCtx({ promptRaw: () => '只说实话。', personaRaw: () => '', memoryRaw: () => '角色记忆' });
+  apply(midEmpty);
+  assert.equal(midEmpty.state.sections[0].text({}), '只说实话。\n\n角色记忆');
+
+  const endsEmpty = makeCtx({ promptRaw: () => '', personaRaw: () => '角色卡正文', memoryRaw: () => '' });
+  apply(endsEmpty);
+  assert.equal(endsEmpty.state.sections[0].text({}), '角色卡正文');
 });
 
-test('段文本：全局记忆空 → 只有角色卡，无前导空行', () => {
-  const ctx = makeCtx({ memoryRaw: () => '', personaRaw: () => '角色卡正文' });
-  apply(ctx);
-  assert.equal(ctx.state.sections[0].text({}), '角色卡正文');
-});
-
-test('段文本：两段都空 → 空提示词（不塞占位符）', () => {
-  const ctx = makeCtx({ memoryRaw: () => '', personaRaw: () => '' });
+test('段文本：三段都空（空白卡全关）→ 空提示词（不塞占位符）', () => {
+  const ctx = makeCtx({ promptRaw: () => '', personaRaw: () => '', memoryRaw: () => '' });
   apply(ctx);
   assert.equal(ctx.state.sections[0].text({}), '');
 });
@@ -272,9 +271,10 @@ test('段文本：my-memory 没装（服务缺失）时降级为空，不抛错'
   assert.equal(ctx.state.sections[0].text({}), '');
 });
 
-test('joinSoloText：单段抛错只丢这一段，另一段照常输出', () => {
+test('joinSoloText：单段抛错只丢这一段，其余两段照常输出', () => {
   const text = joinSoloText(
     {
+      promptRaw: () => '提示词正文',
       memoryRaw() {
         throw new Error('读文件炸了');
       },
@@ -282,7 +282,20 @@ test('joinSoloText：单段抛错只丢这一段，另一段照常输出', () =>
     },
     {},
   );
-  assert.equal(text, '角色卡正文');
+  assert.equal(text, '提示词正文\n\n角色卡正文');
+});
+
+test('joinSoloText：三段顺序固定为 全局提示词 → 角色卡 → 角色记忆', () => {
+  const text = joinSoloText(
+    {
+      // 故意把属性顺序打乱：顺序由 joinSoloText 决定，不由对象字面量决定
+      memoryRaw: () => '记忆',
+      personaRaw: () => '角色',
+      promptRaw: () => '提示词',
+    },
+    {},
+  );
+  assert.equal(text, '提示词\n\n角色\n\n记忆');
 });
 
 test('joinSoloText：provider 缺失 / 形状不对 / 只有成品字段（没裸字段）都安全返回空串', () => {

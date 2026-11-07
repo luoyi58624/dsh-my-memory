@@ -325,3 +325,43 @@ test('serializeEntryFile: 多行正文与标签 JSON 往返', () => {
   assert.ok(src.includes('tags: ["插件","api"]'));
   assert.ok(src.includes('- 列表2'));
 });
+
+test('personaMemory: 缺失即空（不自动建文件）/ 原子写 / 同步读 / 空白卡拒绝', async () => {
+  const { dir, store } = await tempStore();
+  try {
+    // 先造一张真实卡（记忆挂在角色目录下，没有卡就没有目录）
+    await store.createPersona({ dir: 'baby', name: '大肥鱼' });
+    const file = join(dir, 'baby', 'MEMORY.md');
+
+    const missing = await store.readPersonaMemory('baby');
+    assert.equal(missing.path, file);
+    assert.equal(missing.text, '');
+    assert.equal(missing.exists, false);
+    await assert.rejects(readFile(file, 'utf8'), '读不该创建文件');
+    assert.equal(store.personaMemoryTextSync('baby'), '');
+
+    // 写 → 读 → 同步读拿到的都是同一份
+    const saved = await store.writePersonaMemory('baby', '只喝冰美式。');
+    assert.equal(saved.path, file);
+    assert.equal(await readFile(file, 'utf8'), '只喝冰美式。');
+    const got = await store.readPersonaMemory('baby');
+    assert.equal(got.text, '只喝冰美式。');
+    assert.equal(got.exists, true);
+    assert.equal(store.personaMemoryTextSync('baby'), '只喝冰美式。');
+
+    // 空串 = 清空（文件留着、内容为空）
+    await store.writePersonaMemory('baby', '');
+    assert.equal(await readFile(file, 'utf8'), '');
+    assert.equal(store.personaMemoryTextSync('baby'), '');
+
+    // 空白卡 / 不存在 / 非法 id
+    assert.equal((await store.readPersonaMemory('__none__')).text, '');
+    await assert.rejects(store.writePersonaMemory('__none__', 'x'), /空白卡没有长期记忆/);
+    await assert.rejects(store.writePersonaMemory('nope', 'x'), /找不到角色卡/);
+    // 点号路径不能穿出数据根
+    assert.equal((await store.readPersonaMemory('..')).text, '');
+    assert.equal(store.personaMemoryTextSync('..'), '');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

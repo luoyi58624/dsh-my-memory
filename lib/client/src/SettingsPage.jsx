@@ -173,7 +173,7 @@ export function SettingsPage({ onChanged, pick } = {}) {
     <div className="dsh-mymem-settings" data-dsh-plugin="my-memory" data-dsh-part="settings">
       <div className="dsh-mymem-settings-title">数据目录</div>
       <div className="dsh-mymem-hint">
-        角色卡、全局记忆、项目记忆都存在这个目录里。换目录后旧数据不会自动搬过去。
+        角色卡、每个角色的长期记忆、全局提示词、项目记忆都存在这个目录里。换目录后旧数据不会自动搬过去。
       </div>
 
       <div className="dsh-mymem-settings-path" title={data?.dataDir || ''}>

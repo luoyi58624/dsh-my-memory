@@ -1,11 +1,11 @@
 /**
- * GlobalMemoryPage.jsx —— 面板「长期记忆」页
+ * PersonaMemoryPage.jsx —— 面板「长期记忆」页
  *
- * 一整块**始终可编辑**的 textarea，铺的就是 ~/.dsh/my-memory/MEMORY.md 的原文。
- * 没有「编辑」按钮、没有只读态：这页的用途就是「看一眼 / 顺手改一行」，
- * 多一层状态切换只是多一次误点。
+ * 一整块**始终可编辑**的 textarea，铺的就是当前选中角色的
+ * `<数据根>/<角色id>/MEMORY.md` 原文 —— 长期记忆是**每个角色自己**的，
+ * 换角色就是换记忆，所以这一页跟着左侧选中的卡走（key 里带 id，换卡整体重建重拉）。
  *
- * 三个关键行为（都是老板明确要的）：
+ * 三个关键行为（沿用原来的交互，只是数据源从「全局那份」换成了「这个角色那份」）：
  * 1. **聚焦即同步**：onFocus 拉一次磁盘最新内容。
  *    - 本地干净（dirty=false）→ 直接换成磁盘版，静默；
  *    - 本地有改动且磁盘 rev 变了 → **不覆盖**，顶部出一条黄条提示 + 「对比」。
@@ -13,13 +13,13 @@
  * 3. **版本冲突**：宿主 409 时不覆盖、不丢本地内容，弹 diff 面板三选一
  *    （用我的覆盖 / 用磁盘的 / 取消）。
  *
- * 为什么不在这里放保存按钮：和角色卡一致 —— 页面上永远没有「我刚才是不是忘了点保存」这个问题。
+ * 空白卡（__none__）不参与：它是虚拟卡，没有目录也没有记忆文件 —— 这一页只给一句说明，不给输入框。
  */
 import * as React from 'react';
-import { fetchGlobalMemoryRaw, saveGlobalMemoryRaw } from './api.js';
+import { fetchPersonaMemory, savePersonaMemory } from './api.js';
 import { diffLines, countDiff } from './diff.js';
 
-/** 把绝对路径缩成 ~\.dsh\my-memory\MEMORY.md 这种短形式（面板里空间小） */
+/** 把绝对路径缩成 ~\\.dsh\\dsh-my-memory\\baby\\MEMORY.md 这种短形式（面板里空间小） */
 function shortPath(p) {
   if (!p) return '';
   return String(p).replace(/^[A-Za-z]:\\Users\\[^\\]+/i, '~');
@@ -32,7 +32,13 @@ function hhmm() {
   return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-export function GlobalMemoryPage() {
+/**
+ * @param {{persona?: {id:string, name?:string, virtual?:boolean}, onSaved?: (text:string) => void}} props
+ *   persona 是左侧选中的那张卡；缺省/虚拟卡时只显示提示，不读也不写。
+ */
+export function PersonaMemoryPage({ persona, onSaved } = {}) {
+  const personaId = String(persona?.id ?? '');
+  const isVirtual = Boolean(persona?.virtual);
   const [doc, setDoc] = React.useState(null);
   const [loading, setLoading] = React.useState(true);
   const [err, setErr] = React.useState('');
@@ -59,11 +65,16 @@ export function GlobalMemoryPage() {
     revRef.current = rev;
   }, [text, dirty, rev]);
 
-  /** 载入磁盘内容（首次进入 / 点刷新） */
+  /** 载入磁盘内容（进入本页 / 换角色重建 / 点刷新） */
   const load = React.useCallback(async () => {
+    if (!personaId || isVirtual) {
+      setLoading(false);
+      setDoc(null);
+      return;
+    }
     setLoading(true);
     try {
-      const res = await fetchGlobalMemoryRaw();
+      const res = await fetchPersonaMemory(personaId);
       const disk = String(res?.text ?? '');
       setDoc({ path: String(res?.path ?? '') });
       setText(disk);
@@ -76,7 +87,7 @@ export function GlobalMemoryPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [personaId, isVirtual]);
 
   React.useEffect(() => {
     void load();
@@ -87,8 +98,9 @@ export function GlobalMemoryPage() {
    * 干净 → 静默替换；脏且有更新 → 只出提示条（绝不覆盖用户正在敲的东西）。
    */
   async function onFocus() {
+    if (!personaId || isVirtual) return;
     try {
-      const res = await fetchGlobalMemoryRaw();
+      const res = await fetchPersonaMemory(personaId);
       const diskText = String(res?.text ?? '');
       const diskRev = String(res?.rev ?? '');
       if (!dirtyRef.current) {
@@ -107,16 +119,17 @@ export function GlobalMemoryPage() {
 
   /** 失焦自动保存（只在 dirty 时） */
   async function onBlur() {
-    if (!dirtyRef.current || saving) return;
+    if (!dirtyRef.current || saving || !personaId || isVirtual) return;
     const payload = textRef.current;
     setSaving(true);
     setErr('');
     try {
-      const res = await saveGlobalMemoryRaw({ scope: 'global', text: payload, baseRev: revRef.current });
+      const res = await savePersonaMemory({ personaId, text: payload, baseRev: revRef.current });
       setRev(String(res?.rev ?? ''));
       setSyncedText(String(res?.text ?? payload));
       setRemote(null);
       setSavedAt(hhmm());
+      if (typeof onSaved === 'function') onSaved(String(res?.text ?? payload));
     } catch (e) {
       if (e?.status === 409) {
         // 冲突：内容留在编辑器里，交给用户裁决
@@ -137,15 +150,22 @@ export function GlobalMemoryPage() {
 
   /** 「用我的覆盖」：带 force 再写一次 */
   async function overwriteWithMine() {
+    if (!personaId) return;
     setSaving(true);
     setErr('');
     try {
-      const res = await saveGlobalMemoryRaw({ scope: 'global', text: textRef.current, baseRev: revRef.current, force: true });
+      const res = await savePersonaMemory({
+        personaId,
+        text: textRef.current,
+        baseRev: revRef.current,
+        force: true,
+      });
       setRev(String(res?.rev ?? ''));
       setSyncedText(String(res?.text ?? textRef.current));
       setRemote(null);
       setPanel(null);
       setSavedAt(hhmm());
+      if (typeof onSaved === 'function') onSaved(String(res?.text ?? textRef.current));
     } catch (e) {
       setErr(`覆盖失败：${e?.message || e}`);
     } finally {
@@ -162,14 +182,30 @@ export function GlobalMemoryPage() {
     setPanel(null);
   }
 
+  // 空白卡：没有目录、没有记忆文件，这一页只说明一句
+  if (isVirtual) {
+    return (
+      <div className="dsh-mymem-raw" data-dsh-plugin="my-memory" data-dsh-part="persona-memory">
+        <div className="dsh-mymem-empty">空白卡没有长期记忆：它不注入任何提示词，也没有对应的角色目录。</div>
+      </div>
+    );
+  }
+  if (!personaId) {
+    return (
+      <div className="dsh-mymem-raw" data-dsh-plugin="my-memory" data-dsh-part="persona-memory">
+        <div className="dsh-mymem-empty">先在左边选一张角色卡</div>
+      </div>
+    );
+  }
+
   const rows = panel ? diffLines(panel.mode === 'conflict' ? panel.diskText : panel.text, text) : [];
   const counts = countDiff(rows);
 
   return (
-    <div className="dsh-mymem-raw" data-dsh-plugin="my-memory" data-dsh-part="global-memory">
+    <div className="dsh-mymem-raw" data-dsh-plugin="my-memory" data-dsh-part="persona-memory">
       <div className="dsh-mymem-raw-head">
         <span className="dsh-mymem-hint" title={doc?.path || ''}>
-          {doc?.path ? `文件：${shortPath(doc.path)}` : ''}
+          {doc?.path ? `文件：${shortPath(doc.path)}` : `${persona?.name || personaId} 的长期记忆`}
         </span>
         <span className="dsh-mymem-spacer" />
         <button className="dsh-mymem-btn dsh-mymem-btn--ghost" type="button" disabled={loading || saving} onClick={() => void load()}>
@@ -198,7 +234,7 @@ export function GlobalMemoryPage() {
         className="dsh-mymem-raw-edit"
         value={text}
         spellCheck={false}
-        placeholder="这里是 MEMORY.md 的原文，直接改就行；失焦自动保存"
+        placeholder={`这里是「${persona?.name || personaId}」的 MEMORY.md 原文（只属于这个角色），直接改就行；失焦自动保存`}
         onFocus={() => void onFocus()}
         onBlur={() => void onBlur()}
         onChange={(e) => setText(e.target.value)}
@@ -217,11 +253,7 @@ export function GlobalMemoryPage() {
           </div>
           <div className="dsh-mymem-diff-body">
             {rows.map((r, i) => (
-              <div
-                key={i}
-                className="dsh-mymem-diffline"
-                data-kind={r.kind}
-              >
+              <div key={i} className="dsh-mymem-diffline" data-kind={r.kind}>
                 <span className="dsh-mymem-diffmark">{r.kind === 'add' ? '+' : r.kind === 'del' ? '−' : ' '}</span>
                 <span className="dsh-mymem-difftext">{r.text || ' '}</span>
               </div>

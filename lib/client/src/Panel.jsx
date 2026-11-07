@@ -10,6 +10,8 @@
  * 每张卡两行：第一行 圆头像 + 名字 + 「默认」chip；第二行是这卡 agent.md 的路径小字
  * —— 它回答「我现在改的到底是哪个文件」，比任何说明都直接。
  *
+ * 「长期记忆」内页铺的是**当前选中角色**的 MEMORY.md（每角色一份，跟着选中走）。
+ *
  * 两个「选中」分开：
  *   activeId   —— 宿主概念，决定下一轮对话注入哪张卡（右键「设为默认」改它）
  *   selectedId —— 界面概念，决定右边正在编辑哪张卡（点哪张就是哪张）
@@ -17,11 +19,11 @@
  */
 import * as React from 'react';
 import { PersonaSection } from './PersonaSection.jsx';
-import { GlobalMemoryPage } from './GlobalMemoryPage.jsx';
+import { PersonaMemoryPage } from './PersonaMemoryPage.jsx';
 import { SettingsPage } from './SettingsPage.jsx';
 import { ContextMenu, menuAt } from './ContextMenu.jsx';
 import { PromptDialog, ConfirmDialog } from './Dialog.jsx';
-import { fetchMemory } from './api.js';
+import { fetchPersonaMemory } from './api.js';
 import {
   fetchPersonas,
   createPersona,
@@ -66,8 +68,8 @@ export function MemoryPanel({ close, pick } = {}) {
   const [err, setErr] = React.useState('');
   const [notice, setNotice] = React.useState('');
   const [menu, setMenu] = React.useState(null);
-  /** 全局记忆条数：标题区副标题「N 条长期记忆」用；拿不到就不显示这一段 */
-  const [globalCount, setGlobalCount] = React.useState(null);
+  /** 选中角色长期记忆的字数：标题区副标题用；拿不到就不显示这一段 */
+  const [memoryCount, setMemoryCount] = React.useState(null);
   const [dialog, setDialog] = React.useState(null);
   /** 每次「更新角色目录」或数据目录切换 +1，用来强制重建右侧编辑页与记忆页 */
   const [reloadTick, setReloadTick] = React.useState(0);
@@ -108,12 +110,6 @@ export function MemoryPanel({ close, pick } = {}) {
         if (!alive) return;
         setList(res);
         setSelectedId(res.activeId ?? res.items.find((i) => !i.virtual)?.id ?? null);
-        // 副标题里的条数：单独一路，失败只让这一段不显示，不影响面板
-        fetchMemory({ scope: 'global' })
-          .then((m) => {
-            if (alive) setGlobalCount(m.items.length);
-          })
-          .catch(() => {});
       } catch (e) {
         if (alive) setErr(`读取角色卡失败：${e?.message || e}`);
       }
@@ -254,12 +250,36 @@ export function MemoryPanel({ close, pick } = {}) {
   const selected = list?.items.find((i) => i.id === selectedId) || null;
 
   /**
-   * 副标题：`N 条长期记忆 · 当前角色 <名字>`。
-   * 两块数据都是异步的，缺哪块就省哪块 —— 宁可短一点，也不要显示「undefined 条」。
+   * 副标题里的「N 字长期记忆」：跟着**选中**的角色走（长期记忆是每角色一份）。
+   * 空白卡没有记忆文件，直接不显示这一段；取失败也只是少一行字，不影响面板。
+   */
+  React.useEffect(() => {
+    let alive = true;
+    if (!selectedId || selected?.virtual) {
+      setMemoryCount(null);
+      return () => {
+        alive = false;
+      };
+    }
+    fetchPersonaMemory(selectedId)
+      .then((m) => {
+        if (alive) setMemoryCount(String(m?.text ?? '').trim().length);
+      })
+      .catch(() => {
+        if (alive) setMemoryCount(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [selectedId, selected?.virtual, reloadTick]);
+
+  /**
+   * 副标题：`N 字长期记忆 · 当前角色 <名字>`。
+   * 两块数据都是异步的，缺哪块就省哪块 —— 宁可短一点，也不要显示「undefined」。
    */
   const activePersona = list?.items.find((i) => i.id === list.activeId) || selected;
   const subtitle = [
-    globalCount === null ? '' : `${globalCount} 条长期记忆`,
+    memoryCount === null ? '' : `${memoryCount} 字长期记忆`,
     activePersona ? `当前角色 ${activePersona.name || activePersona.id}` : '',
   ]
     .filter(Boolean)
@@ -370,8 +390,12 @@ export function MemoryPanel({ close, pick } = {}) {
 
               <div className="dsh-mymem-main">
                 {tab === 'memory' ? (
-                  // 数据目录切换后 key 变化 → 记忆页重新读一次原文
-                  <GlobalMemoryPage key={`raw:${reloadTick}`} />
+                  // key 里带 id：换角色 / 目录改名 / 数据目录切换后整体重建，重新拉那份 MEMORY.md
+                  <PersonaMemoryPage
+                    key={`mem:${selected?.id ?? ''}:${reloadTick}`}
+                    persona={selected}
+                    onSaved={(text) => setMemoryCount(String(text ?? '').trim().length)}
+                  />
                 ) : selected && !selected.virtual ? (
                   // key 里带 id：换卡 / 目录改名后整体重建，别把旧草稿带过来
                   <PersonaSection

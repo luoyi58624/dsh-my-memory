@@ -261,7 +261,7 @@ async function waitForFile(file, timeoutMs = 2000) {
   }, timeoutMs);
 }
 
-test('全局提示词：启动后在数据根建出 AGENT.md，默认值直接注入角色卡段', async () => {
+test('全局提示词：启动后在数据根建出 AGENT.md，默认值注入独立的 my-memory:agent 段', async () => {
   const { ctx, dir } = await startPlugin();
   try {
     const promptFile = join(dir, 'AGENT.md');
@@ -269,9 +269,12 @@ test('全局提示词：启动后在数据根建出 AGENT.md，默认值直接�
     // 文件内容是提示词本体：没有 frontmatter、没有标题
     assert.equal(await readFile(promptFile, 'utf8'), `${DEFAULT_AGENT_PROMPT}\n`);
     // 没改过就直接用默认值注入，且不挑会话（所有角色通用）
-    const text = renderSection(ctx, 'my-memory:persona', { agent: { session: { id: 'sess-x' } } });
-    assert.ok(text.includes('# 全局对话要求'), text);
+    const text = renderSection(ctx, 'my-memory:agent', { agent: { session: { id: 'sess-x' } } });
+    assert.ok(text.includes('# 全局提示词'), text);
     assert.ok(text.includes(DEFAULT_AGENT_PROMPT), text);
+    // 它不再混进角色卡段：规矩和「这个人是谁」是两件事
+    const personaText = renderSection(ctx, 'my-memory:persona', { agent: { session: { id: 'sess-x' } } });
+    assert.ok(!personaText.includes(DEFAULT_AGENT_PROMPT), personaText);
   } finally {
     ctx.state.effects.forEach((d) => typeof d === 'function' && d());
     await rm(dir, { recursive: true, force: true });
@@ -294,7 +297,7 @@ test('全局提示词：PUT /settings/prompt 保存生效，空串 = 整节不�
     assert.equal(saved.status, 200);
     assert.equal(saved.body.ok, true);
     assert.equal(await readFile(join(dir, 'AGENT.md'), 'utf8'), '只说实话。');
-    const afterSave = renderSection(ctx, 'my-memory:persona', {
+    const afterSave = renderSection(ctx, 'my-memory:agent', {
       agent: { session: { id: 'sess-x' } },
     });
     assert.ok(afterSave.includes('只说实话。'), afterSave);
@@ -303,12 +306,14 @@ test('全局提示词：PUT /settings/prompt 保存生效，空串 = 整节不�
     // 清空 = 用户不要这段：整节消失（不是注入空标题）
     const cleared = await api('PUT', '/settings/prompt', { text: '' });
     assert.equal(cleared.status, 200);
-    const afterClear = renderSection(ctx, 'my-memory:persona', {
+    const afterClear = renderSection(ctx, 'my-memory:agent', {
       agent: { session: { id: 'sess-x' } },
     });
-    assert.ok(!afterClear.includes('# 全局对话要求'), afterClear);
+    assert.equal(afterClear, '', '清空后这一段整体消失，不留空标题');
     // 角色卡段本身还在
-    assert.ok(afterClear.includes('# 角色设定'), afterClear);
+    assert.ok(
+      renderSection(ctx, 'my-memory:persona', { agent: { session: { id: 'sess-x' } } }).includes('# 角色设定'),
+    );
 
     // 非字符串 / 超长都要拒绝
     assert.equal((await api('PUT', '/settings/prompt', { text: 1 })).status, 400);
@@ -325,7 +330,7 @@ test('全局提示词：用户直接改 AGENT.md 也生效（不经面板）', a
     await waitForFile(join(dir, 'AGENT.md'));
     // 模拟用户用编辑器改文件：长度和默认值不同，mtime+size 缓存必然失效
     await writeFile(join(dir, 'AGENT.md'), '手改的提示词：别自称模型。\n', 'utf8');
-    const text = renderSection(ctx, 'my-memory:persona', { agent: { session: { id: 'sess-x' } } });
+    const text = renderSection(ctx, 'my-memory:agent', { agent: { session: { id: 'sess-x' } } });
     assert.ok(text.includes('手改的提示词：别自称模型。'), text);
     assert.ok(!text.includes(DEFAULT_AGENT_PROMPT), '手改之后默认值不该再出现');
   } finally {
@@ -334,7 +339,7 @@ test('全局提示词：用户直接改 AGENT.md 也生效（不经面板）', a
   }
 });
 
-test('记忆段：全局 + 项目索引合成，且内容不变时字节稳定（KV 缓存友好）', async () => {
+test('记忆段：该角色长期记忆 + 项目索引合成，且内容不变时字节稳定（KV 缓存友好）', async () => {
   const { ctx, api, dir, cwd } = await startPlugin();
   try {
     clearSyncCache();
@@ -342,14 +347,15 @@ test('记忆段：全局 + 项目索引合成，且内容不变时字节稳定�
     // 造一个 git 仓库，并打开当前目录的局部记忆开关（默认是关的）
     await mkdir(join(cwd, '.git'), { recursive: true });
     await api('POST', '/project/state', { cwd, enabled: true });
-    await api('POST', '/memory', { text: '主人叫我大肥鱼', title: '称呼', scope: 'global' });
+    // 长期记忆是**每角色一份**：默认卡是 baby，就写它的 <root>/baby/MEMORY.md
+    await api('PUT', '/persona/memory', { personaId: 'baby', text: '主人叫我大肥鱼。' });
     await api('POST', '/memory', {
       text: 'DSH 插件 Config 用 schemastery',
       title: 'Config',
       scope: 'project',
     });
     const first = renderSection(ctx, 'my-memory:context');
-    assert.ok(first.includes('# 长期记忆（全局）'));
+    assert.ok(first.includes('# 长期记忆'), first);
     assert.ok(first.includes('主人叫我大肥鱼'));
     assert.ok(first.includes('# 项目记忆 · workspace'));
     assert.ok(first.includes('DSH 插件 Config 用 schemastery'));
@@ -358,24 +364,24 @@ test('记忆段：全局 + 项目索引合成，且内容不变时字节稳定�
     assert.equal(first, second);
     // 没有新内容时，再组装几次也一样
     assert.equal(renderSection(ctx, 'my-memory:context'), first);
-    // 新增内容后才必须变化
-    await api('POST', '/memory', { text: '另一条全局记忆', scope: 'global' });
+    // 记忆内容变了才必须变化
+    await api('PUT', '/persona/memory', { personaId: 'baby', text: '主人叫我大肥鱼。\n还是别自称模型。' });
     const third = renderSection(ctx, 'my-memory:context');
     assert.notEqual(third, first);
-    assert.ok(third.includes('另一条全局记忆'));
+    assert.ok(third.includes('还是别自称模型。'));
   } finally {
     ctx.state.effects.forEach((d) => typeof d === 'function' && d());
     await rm(dir, { recursive: true, force: true });
   }
 });
 
-test('记忆段：预算裁剪保留头尾（最新追加的条目不能被截掉）', async () => {
+test('记忆段：预算裁剪保留头尾（角色记忆太长时也不能把最近的截掉）', async () => {
   const { ctx, api, dir, cwd } = await startPlugin({ globalBudget: 120 });
   try {
     clearSyncCache();
-    for (let i = 0; i < 20; i += 1) {
-      await api('POST', '/memory', { text: `第${i}条记忆内容内容内容内容内容`, scope: 'global' });
-    }
+    const lines = [];
+    for (let i = 0; i < 20; i += 1) lines.push(`第${i}条记忆内容内容内容内容内容`);
+    await api('PUT', '/persona/memory', { personaId: 'baby', text: lines.join('\n') });
     const text = renderSection(ctx, 'my-memory:context');
     assert.ok(text.includes('…（中段省略）…'), '超预算时应保留头尾并标明中段省略');
     assert.ok(text.includes('第19条'), '最近追加的条目必须还能看到');
@@ -688,10 +694,10 @@ test('空白卡：列表首位是虚拟卡，设为默认后三段提示词全�
     assert.equal(list.body.activeId, 'baby', '虚拟卡不参与 activeId 的默认解析');
 
     // 先证明「非空白」状态下确实有内容可注入，否则下面的空断言没有意义
-    await api('POST', '/memory', { text: '主人叫我大肥鱼', scope: 'global' });
+    await api('PUT', '/persona/memory', { personaId: 'baby', text: '主人叫我大肥鱼' });
     const before = renderSection(ctx, 'my-memory:persona');
     assert.ok(before.includes('# 角色设定'));
-    assert.ok(before.includes('# 全局对话要求'));
+    assert.ok(renderSection(ctx, 'my-memory:agent').includes('# 全局提示词'));
     assert.ok(renderSection(ctx, 'my-memory:context').includes('主人叫我大肥鱼'));
 
     const setDefault = await api('POST', '/personas/__none__/default');
@@ -699,12 +705,12 @@ test('空白卡：列表首位是虚拟卡，设为默认后三段提示词全�
     assert.deepEqual(setDefault.body, { ok: true, activeId: '__none__' });
     assert.equal((await api('GET', '/personas')).body.activeId, '__none__');
 
-    // 未绑定的会话跟着全局默认走 → 角色卡段（含 AGENT.md）与记忆段都必须是空串
+    // 未绑定的会话跟着全局默认走 → 三段（全局提示词 / 角色卡 / 角色记忆）都必须是空串
     const assembly = { agent: { session: { id: 'sess-unbound' } } };
     const personaText = renderSection(ctx, 'my-memory:persona', assembly);
     assert.equal(personaText, '');
     assert.ok(!personaText.includes('# 角色设定'));
-    assert.ok(!personaText.includes('# 全局对话要求'));
+    assert.equal(renderSection(ctx, 'my-memory:agent', assembly), '', '空白卡连全局提示词也不注入');
     assert.equal(renderSection(ctx, 'my-memory:context', assembly), '');
 
     // 旧单卡接口也报「空白」空正文，不能悄悄回落到第一张真实卡
@@ -720,8 +726,8 @@ test('空白卡：列表首位是虚拟卡，设为默认后三段提示词全�
 test('空白卡：会话绑定优先于全局默认，切回真实卡后未绑定会话恢复注入', async () => {
   const { ctx, api, dir } = await startPlugin();
   try {
-    await api('POST', '/memory', { text: '主人叫我大肥鱼', scope: 'global' });
     const realId = (await api('GET', '/personas')).body.items.find((i) => !i.virtual).id;
+    await api('PUT', '/persona/memory', { personaId: realId, text: '主人叫我大肥鱼' });
     await api('POST', '/personas/__none__/default');
 
     // 给某个会话绑定「空白」
@@ -738,9 +744,11 @@ test('空白卡：会话绑定优先于全局默认，切回真实卡后未绑�
 
     const noneAssembly = { agent: { session: { id: 'sess-none' } } };
     const otherAssembly = { agent: { session: { id: 'sess-other' } } };
+    assert.equal(renderSection(ctx, 'my-memory:agent', noneAssembly), '');
     assert.equal(renderSection(ctx, 'my-memory:persona', noneAssembly), '');
     assert.equal(renderSection(ctx, 'my-memory:context', noneAssembly), '');
     // 另一个会话没绑定，此时 active 也是 none → 同样不注入
+    assert.equal(renderSection(ctx, 'my-memory:agent', otherAssembly), '');
     assert.equal(renderSection(ctx, 'my-memory:persona', otherAssembly), '');
     assert.equal(renderSection(ctx, 'my-memory:context', otherAssembly), '');
 
@@ -748,7 +756,7 @@ test('空白卡：会话绑定优先于全局默认，切回真实卡后未绑�
     await api('POST', `/personas/${realId}/default`);
     const restored = renderSection(ctx, 'my-memory:persona', otherAssembly);
     assert.ok(restored.includes('# 角色设定'));
-    assert.ok(restored.includes('# 全局对话要求'));
+    assert.ok(renderSection(ctx, 'my-memory:agent', otherAssembly).includes('# 全局提示词'));
     assert.ok(renderSection(ctx, 'my-memory:context', otherAssembly).includes('主人叫我大肥鱼'));
     assert.equal(renderSection(ctx, 'my-memory:persona', noneAssembly), '');
     assert.equal(renderSection(ctx, 'my-memory:context', noneAssembly), '');
@@ -814,11 +822,13 @@ test('HTTP · PUT /memory/raw 原子写回原文，读回一致且注入立刻�
     // GET /memory/raw 读回同一份
     const got = await api('GET', '/memory/raw?scope=global');
     assert.equal(got.body.text, text);
-    // 条目解析正常，注入段立刻是新内容
+    // 条目解析正常
     const listed = await api('GET', '/memory?scope=global');
     assert.equal(listed.body.items.length, 1);
     assert.equal(listed.body.items[0].id, 'g_1a2b3c4d');
-    assert.ok(renderSection(ctx, 'my-memory:context').includes('主人叫我大肥鱼'));
+    // 新模型里这份 <root>/MEMORY.md 只是旧数据：长期记忆改由每角色的 MEMORY.md 提供，
+    // 所以它**不再**出现在注入里（底层读写能力仍然保留）
+    assert.ok(!renderSection(ctx, 'my-memory:context').includes('主人叫我大肥鱼'));
 
     // 空字符串合法（清空）
     const cleared = await api('PUT', '/memory/raw', { scope: 'global', text: '' });
@@ -1040,12 +1050,12 @@ test('HTTP · 局部记忆开关：默认关 / 打开建文件 / 关闭保留内
     assert.equal(off.body.exists, true);
     assert.equal(await readFile(memoryPath, 'utf8'), withEntry, '关闭后内容不能变');
 
-    // 关闭后注入段不含项目记忆，但全局照常
-    await api('POST', '/memory', { text: '全局那条', scope: 'global' });
+    // 关闭后注入段不含项目记忆，但角色自己的长期记忆照常
+    await api('PUT', '/persona/memory', { personaId: 'baby', text: '角色那条' });
     const injected = renderSection(ctx, 'my-memory:context', {
       agent: { session: { id: 's1' } },
     });
-    assert.ok(injected.includes('全局那条'));
+    assert.ok(injected.includes('角色那条'));
     assert.ok(!injected.includes('Config 的默认值必须给'), '关掉后项目段不注入');
 
     // 打开后又能注入
@@ -1349,4 +1359,165 @@ test('纯函数：retainEnds / looksTechnical 的可解释判据', () => {
   assert.ok(looksTechnical('lib/host/index.js'));
   assert.ok(!looksTechnical('主人喜欢喝冰美式，不加糖'));
   assert.ok(!looksTechnical('她讨厌被人催'));
+});
+
+test('注入顺序：全局提示词 → 角色卡 → 该角色长期记忆（三段各自独立、顺序固定）', async () => {
+  const { ctx, api, dir } = await startPlugin();
+  try {
+    await waitForFile(join(dir, 'AGENT.md'));
+    await api('PUT', '/settings/prompt', { text: '先是规矩：只说实话。' });
+    await api('PUT', '/persona', { name: '大肥鱼', body: '我是大肥鱼，18 岁。' });
+    await api('PUT', '/persona/memory', { personaId: 'baby', text: '昨天说过喜欢冰美式。' });
+
+    // 段序：AGENT.md 在最前，角色卡居中，长期记忆最后
+    assert.ok(sectionOf(ctx, 'my-memory:agent').order < sectionOf(ctx, 'my-memory:persona').order);
+    assert.ok(sectionOf(ctx, 'my-memory:persona').order < sectionOf(ctx, 'my-memory:context').order);
+
+    const assembly = { agent: { session: { id: 's1' } } };
+    const agentText = renderSection(ctx, 'my-memory:agent', assembly);
+    const personaText = renderSection(ctx, 'my-memory:persona', assembly);
+    const contextText = renderSection(ctx, 'my-memory:context', assembly);
+    assert.equal(agentText, '# 全局提示词\n\n先是规矩：只说实话。');
+    assert.equal(
+      personaText,
+      '# 角色设定\n\n你现在扮演这个角色（角色卡「大肥鱼」）：\n我是大肥鱼，18 岁。',
+    );
+    assert.equal(contextText, '# 长期记忆\n\n昨天说过喜欢冰美式。');
+    // 各就各位：AGENT.md 不进角色卡段，角色记忆也不进角色卡段
+    assert.ok(!personaText.includes('先是规矩'));
+    assert.ok(!personaText.includes('冰美式'));
+    assert.ok(!contextText.includes('我是大肥鱼'));
+  } finally {
+    ctx.state.effects.forEach((d) => typeof d === 'function' && d());
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('每角色长期记忆：写 → 读 → 注入，换角色不串台，空文件不产生多余空行，空白卡被拒', async () => {
+  const { ctx, api, dir } = await startPlugin();
+  try {
+    const memoryPath = join(dir, 'baby', 'MEMORY.md');
+    // 一开始没有文件：读接口报空，而且**不自动创建**（用户没写过就是没有）
+    const empty = await api('GET', '/persona/memory?id=baby');
+    assert.equal(empty.status, 200);
+    assert.equal(empty.body.personaId, 'baby');
+    assert.equal(empty.body.path, memoryPath);
+    assert.equal(empty.body.text, '');
+    assert.equal(empty.body.exists, false);
+    await assert.rejects(readFile(memoryPath, 'utf8'), '首次访问不能凭空建出 MEMORY.md');
+
+    // 写 → 落盘 → 读回（rev 就是内容指纹）
+    const put = await api('PUT', '/persona/memory', { personaId: 'baby', text: '大肥鱼只喝冰美式。\n' });
+    assert.equal(put.status, 200);
+    assert.equal(put.body.ok, true);
+    assert.equal(put.body.path, memoryPath);
+    assert.equal(put.body.rev, contentRev('大肥鱼只喝冰美式。\n'));
+    assert.equal(await readFile(memoryPath, 'utf8'), '大肥鱼只喝冰美式。\n');
+    const got = await api('GET', '/persona/memory?id=baby');
+    assert.equal(got.body.text, '大肥鱼只喝冰美式。\n');
+    assert.equal(got.body.exists, true);
+    assert.equal(got.body.rev, contentRev('大肥鱼只喝冰美式。\n'));
+
+    // 注入：标题 + 这个角色的正文（尾随空白被裁掉，不留多余空行）
+    const injected = renderSection(ctx, 'my-memory:context', { agent: { session: { id: 's1' } } });
+    assert.equal(injected, '# 长期记忆\n\n大肥鱼只喝冰美式。');
+
+    // 换一个角色：它自己没有记忆 → 注入里不能再出现别人的内容（隔离）
+    assert.equal((await api('POST', '/personas', { dir: 'cat' })).status, 200);
+    await api('POST', '/personas/cat/default');
+    assert.equal(renderSection(ctx, 'my-memory:context', { agent: { session: { id: 's1' } } }), '');
+
+    // 各存各的
+    await api('PUT', '/persona/memory', { personaId: 'cat', text: '猫猫只吃冻干。' });
+    assert.equal((await api('GET', '/persona/memory?id=cat')).body.text, '猫猫只吃冻干。');
+    assert.equal((await api('GET', '/persona/memory?id=baby')).body.text, '大肥鱼只喝冰美式。\n');
+
+    // 会话绑定优先于 active 卡：绑 baby 的会话读到的是 baby 的记忆
+    await api('POST', '/session/persona', { session: 'sess-baby', personaId: 'baby' });
+    const bound = renderSection(ctx, 'my-memory:context', { agent: { session: { id: 'sess-baby' } } });
+    assert.ok(bound.includes('大肥鱼只喝冰美式。'), bound);
+    assert.ok(!bound.includes('猫猫只吃冻干。'), bound);
+
+    // 空文件 / 只有空白 → 空段（不留标题，也不留多余空行）
+    await api('PUT', '/persona/memory', { personaId: 'cat', text: '' });
+    assert.equal(renderSection(ctx, 'my-memory:context', { agent: { session: { id: 's2' } } }), '');
+    await api('PUT', '/persona/memory', { personaId: 'cat', text: '   \n\n  ' });
+    assert.equal(renderSection(ctx, 'my-memory:context', { agent: { session: { id: 's2' } } }), '');
+
+    // 空白卡：读返回空、写明确拒绝（不是静默写入）
+    const noneRead = await api('GET', '/persona/memory?id=__none__');
+    assert.equal(noneRead.status, 200);
+    assert.deepEqual(
+      {
+        personaId: noneRead.body.personaId,
+        path: noneRead.body.path,
+        text: noneRead.body.text,
+        exists: noneRead.body.exists,
+      },
+      { personaId: '__none__', path: '', text: '', exists: false },
+    );
+    const noneWrite = await api('PUT', '/persona/memory', { personaId: '__none__', text: 'x' });
+    assert.equal(noneWrite.status, 400);
+    assert.match(String(noneWrite.body.error), /空白卡没有长期记忆/);
+
+    // 缺 id / 不存在的角色
+    assert.equal((await api('GET', '/persona/memory')).status, 400);
+    assert.equal((await api('GET', '/persona/memory?id=nope')).status, 404);
+    assert.equal((await api('PUT', '/persona/memory', { personaId: 'nope', text: 'x' })).status, 404);
+  } finally {
+    ctx.state.effects.forEach((d) => typeof d === 'function' && d());
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('每角色长期记忆：版本号冲突不写盘（409 + 磁盘当前全文），force 才覆盖', async () => {
+  const { ctx, api, dir } = await startPlugin();
+  try {
+    await api('PUT', '/persona/memory', { personaId: 'baby', text: '第一版' });
+    const base = (await api('GET', '/persona/memory?id=baby')).body.rev;
+    // 另一个页签先写了
+    const second = await api('PUT', '/persona/memory', { personaId: 'baby', text: '第二版', baseRev: base });
+    assert.equal(second.status, 200);
+
+    // 拿着旧 rev 再写 → 409，磁盘不动，响应里带磁盘全文
+    const stale = await api('PUT', '/persona/memory', {
+      personaId: 'baby',
+      text: '我的旧版本',
+      baseRev: base,
+    });
+    assert.equal(stale.status, 409);
+    assert.equal(stale.body.conflict, true);
+    assert.equal(stale.body.text, '第二版');
+    assert.equal(await readFile(join(dir, 'baby', 'MEMORY.md'), 'utf8'), '第二版');
+
+    // force：用户明确要覆盖
+    const forced = await api('PUT', '/persona/memory', {
+      personaId: 'baby',
+      text: '我的旧版本',
+      baseRev: base,
+      force: true,
+    });
+    assert.equal(forced.status, 200);
+    assert.equal(await readFile(join(dir, 'baby', 'MEMORY.md'), 'utf8'), '我的旧版本');
+    // 写完注入立刻是新内容
+    assert.ok(renderSection(ctx, 'my-memory:context', { agent: { session: { id: 's1' } } }).includes('我的旧版本'));
+  } finally {
+    ctx.state.effects.forEach((d) => typeof d === 'function' && d());
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('每角色长期记忆：角色目录改名/删除时文件跟着走（不额外删用户记忆）', async () => {
+  const { api, dir } = await startPlugin();
+  try {
+    await api('PUT', '/persona/memory', { personaId: 'baby', text: '属于 baby 的记忆' });
+    const renamed = await api('POST', '/personas/baby/rename', { dir: 'doll' });
+    assert.equal(renamed.status, 200);
+    // 整个目录一起搬：名字变了，内容还在
+    assert.equal((await readFile(join(dir, 'doll', 'MEMORY.md'), 'utf8')), '属于 baby 的记忆');
+    assert.equal((await api('GET', '/persona/memory?id=doll')).body.text, '属于 baby 的记忆');
+    await assert.rejects(readFile(join(dir, 'baby', 'MEMORY.md'), 'utf8'));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
