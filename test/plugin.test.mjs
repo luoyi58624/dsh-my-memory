@@ -100,11 +100,11 @@ async function startPlugin(config = {}) {
   await mkdir(cwd, { recursive: true });
   ctx.workingDirectory = { get: () => cwd, defaultDirectory: cwd };
   apply(ctx, { dataDir: dir, ...config });
-  // 启动引导是异步的（建目录 + 写默认角色卡），等它落盘，避免和断言抢跑
+  // 启动引导是异步的（建目录 + 迁移/建默认卡 + 写 personas.json），等它落盘避免断言抢跑
   await waitFor(async () => {
     try {
-      await readFile(join(dir, 'persona.md'), 'utf8');
-      return true;
+      const index = JSON.parse(await readFile(join(dir, 'personas.json'), 'utf8'));
+      return !!(index && index.activeId);
     } catch {
       return false;
     }
@@ -450,6 +450,143 @@ test('工具 schema：parameters 是 object 根的真实 JSON Schema（不是 de
     // required 必须是属性名数组（DSH 子集要求），而不是 author DSL 里的布尔
     assert.deepEqual(ctx.state.tools.get('memory_remember').parameters.required, ['text']);
     assert.deepEqual(ctx.state.tools.get('memory_forget').parameters.required, ['id']);
+  } finally {
+    ctx.state.effects.forEach((d) => typeof d === 'function' && d());
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('HTTP · 多角色卡：列表带 body / 新建 / 改名 / 改正文 / 设为默认', async () => {
+  const { ctx, api, dir } = await startPlugin();
+  try {
+    const created = await api('POST', '/personas', { name: '小猫娘' });
+    assert.equal(created.status, 200);
+    assert.match(created.body.id, /^p_[0-9a-f]{8}$/);
+    assert.equal(created.body.name, '小猫娘');
+    assert.equal(created.body.body, '我是 小猫娘。');
+    assert.ok(created.body.created > 0);
+
+    const list = await api('GET', '/personas');
+    assert.equal(list.status, 200);
+    assert.ok(Array.isArray(list.body.items));
+    // 界面的卡片预览要显示正文，所以列表必须带 body
+    for (const item of list.body.items) {
+      for (const key of ['id', 'name', 'body', 'created', 'updated']) {
+        assert.ok(key in item, `GET /personas 的条目缺字段 ${key}`);
+      }
+    }
+    assert.ok(list.body.items.some((i) => i.id === created.body.id));
+
+    // 改名：id 不变，正文不变
+    const renamed = await api('PUT', `/personas/${created.body.id}`, { name: '小猫猫' });
+    assert.equal(renamed.body.id, created.body.id);
+    assert.equal(renamed.body.name, '小猫猫');
+    assert.equal(renamed.body.body, '我是 小猫娘。');
+
+    // 改正文
+    const rewritten = await api('PUT', `/personas/${created.body.id}`, { body: '我是小猫猫。\n\n别凶我。' });
+    assert.equal(rewritten.body.body, '我是小猫猫。\n\n别凶我。');
+    assert.equal(rewritten.body.name, '小猫猫');
+
+    // 设为默认，注入段立刻换成这张
+    const setDefault = await api('POST', `/personas/${created.body.id}/default`);
+    assert.equal(setDefault.status, 200);
+    assert.deepEqual(setDefault.body, { ok: true, activeId: created.body.id });
+    assert.equal((await api('GET', '/personas')).body.activeId, created.body.id);
+    assert.ok(renderSection(ctx, 'my-memory:persona').includes('别凶我。'));
+
+    // 旧接口 GET /persona 等价于 active 那张
+    const legacy = await api('GET', '/persona');
+    assert.equal(legacy.body.name, '小猫猫');
+    assert.equal(legacy.body.body, '我是小猫猫。\n\n别凶我。');
+    assert.ok(legacy.body.updated > 0);
+  } finally {
+    ctx.state.effects.forEach((d) => typeof d === 'function' && d());
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('HTTP · 多角色卡：删除、只剩一张拒绝、未知 id 404', async () => {
+  const { ctx, api, dir } = await startPlugin();
+  try {
+    const first = (await api('GET', '/personas')).body.items;
+    assert.equal(first.length, 1, '启动引导应当已经建了一张默认卡');
+    const defaultId = first[0].id;
+
+    // 只剩一张：拒绝，文案必须是这句（界面直接展示）
+    const refused = await api('DELETE', `/personas/${defaultId}`);
+    assert.equal(refused.status, 400);
+    assert.equal(refused.body.error, '至少保留一张角色卡');
+
+    // 建第二张后就能删；删 active 时 activeId 自动改指剩下的
+    const second = (await api('POST', '/personas', { name: 'baby' })).body;
+    await api('POST', `/personas/${second.id}/default`);
+    const removed = await api('DELETE', `/personas/${second.id}`);
+    assert.equal(removed.status, 200);
+    assert.equal(removed.body.ok, true);
+    assert.equal(removed.body.activeId, defaultId);
+    assert.deepEqual((await api('GET', '/personas')).body.items.map((i) => i.id), [defaultId]);
+
+    // 未知 id
+    assert.equal((await api('DELETE', '/personas/ghost')).status, 404);
+    assert.equal((await api('PUT', '/personas/ghost', { name: 'x' })).status, 404);
+    const ghostDefault = await api('POST', '/personas/ghost/default');
+    assert.equal(ghostDefault.status, 400);
+    assert.match(String(ghostDefault.body.error), /找不到角色卡/);
+  } finally {
+    ctx.state.effects.forEach((d) => typeof d === 'function' && d());
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('HTTP · PUT /memory/raw 原子写回原文，读回一致且注入立刻生效', async () => {
+  const { ctx, api, dir } = await startPlugin();
+  try {
+    clearSyncCache();
+    const text = '# 全局记忆\n\n## 称呼\n\n- [g_1a2b3c4d] 2026-11-07 主人叫我大肥鱼 | tag: 称呼\n';
+    const put = await api('PUT', '/memory/raw', { scope: 'global', text });
+    assert.equal(put.status, 200);
+    assert.equal(put.body.ok, true);
+    assert.equal(put.body.path, join(dir, 'MEMORY.md'));
+    assert.equal(put.body.text, text);
+
+    // 磁盘原文一致
+    assert.equal(await readFile(join(dir, 'MEMORY.md'), 'utf8'), text);
+    // GET /memory/raw 读回同一份
+    const got = await api('GET', '/memory/raw?scope=global');
+    assert.equal(got.body.text, text);
+    // 条目解析正常，注入段立刻是新内容
+    const listed = await api('GET', '/memory?scope=global');
+    assert.equal(listed.body.items.length, 1);
+    assert.equal(listed.body.items[0].id, 'g_1a2b3c4d');
+    assert.ok(renderSection(ctx, 'my-memory:context').includes('主人叫我大肥鱼'));
+
+    // 空字符串合法（清空）
+    const cleared = await api('PUT', '/memory/raw', { scope: 'global', text: '' });
+    assert.equal(cleared.status, 200);
+    assert.equal(await readFile(join(dir, 'MEMORY.md'), 'utf8'), '');
+    assert.equal((await api('GET', '/memory?scope=global')).body.items.length, 0);
+
+    // 非 global 明确拒绝
+    const bad = await api('PUT', '/memory/raw', { scope: 'project', text: 'x' });
+    assert.equal(bad.status, 400);
+  } finally {
+    ctx.state.effects.forEach((d) => typeof d === 'function' && d());
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('命令 /persona：不带参数列卡，带参切默认', async () => {
+  const { ctx, dir } = await startPlugin();
+  try {
+    const cmd = ctx.state.commands.get('persona');
+    assert.ok(cmd, '/persona 命令应注册');
+    const listOnly = await cmd.handler({});
+    assert.equal(listOnly.kind, 'success');
+    assert.match(listOnly.text, /当前：/);
+    const missing = await cmd.handler({ rawInput: '不存在的角色' });
+    assert.equal(missing.kind, 'error');
+    assert.match(missing.text, /找不到角色卡/);
   } finally {
     ctx.state.effects.forEach((d) => typeof d === 'function' && d());
     await rm(dir, { recursive: true, force: true });

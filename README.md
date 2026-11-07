@@ -95,7 +95,9 @@ soul-md 是 `memory_append / read / search / rewrite`），但语义重叠会让
 
 ```
 ~/.dsh/my-memory/
-  persona.md                     角色卡（只有一张，不做多角色）
+  personas/<id>.md               角色卡，一卡一文件（可新建/改名/删除/切换）
+  personas.json                  { "activeId": "baby" } 当前默认用哪张卡
+  persona.md                     旧版单卡文件（迁移后保留不删，人可能还想看）
   MEMORY.md                      全局记忆（单文件，只装通用/人相关内容）
   projects/
     <slug>/MEMORY.md             该项目局部记忆的主索引（一行一条摘要，用于注入）
@@ -106,16 +108,32 @@ soul-md 是 `memory_append / read / search / rewrite`），但语义重叠会让
 目录名部分做过安全化（去掉 `\ / : * ? " < > |`、去尾点空格、截断 64 字）；
 Windows 上路径大小写不敏感，所以 slug 里的名字部分也统一小写，避免同一个仓库生出两个项目。
 
-### persona.md
+### personas/&lt;id&gt;.md
 
 ```markdown
 ---
+id: p_1a2b3c4d
 name: 大肥鱼
+created: 1762146000000
 updated: 1762146000000
 ---
 
 （角色设定正文，原样保存、原样注入，不拆小节、不改写）
 ```
+
+卡 id 只在新建时生成一次，**改名不会改 id**（否则界面上的选择、URL、外部引用全会失效）：
+
+- 名字是 ASCII 标识符（`baby` / `cat-2`）→ 直接用它（转小写，因为 Windows 文件名大小写不敏感）
+- 中文 / 带空格 / 空名字 → `p_` + 名字 sha1 前 8 位
+- 撞了已有 id → 追加 `-2`、`-3`
+
+### 迁移
+
+启动时如果 `personas/` 不存在或为空、而旧的 `persona.md` 存在，就把它复制成
+`personas/<id>.md` 并写 `personas.json`（created 沿用旧卡的 updated）。
+**旧 `persona.md` 保留不删** —— 删了不可逆，而它只有几 KB。
+`activeId` 失效（卡被手删、json 被改坏）时回落到「排序第一张」（created 最早的那张），
+读列表时顺手把自愈结果写回磁盘；注入路径（同步）只算不写。
 
 ### MEMORY.md（全局）
 
@@ -161,7 +179,7 @@ tags: ["插件","api"]
 
 | 段名 | 段序 | 内容 |
 | --- | --- | --- |
-| `my-memory:persona` | `personaOrder`（1.1） | 角色卡正文，超预算截断加 `…` |
+| `my-memory:persona` | `personaOrder`（1.1） | **activeId 那张卡**的正文，超预算截断加 `…` |
 | `my-memory:context` | `order`（1.2） | 全局记忆全文（头尾裁剪）+ 当前项目索引（头尾裁剪） |
 
 角色卡段形如：
@@ -211,6 +229,7 @@ tags: ["插件","api"]
 
 - `/remember <内容>` —— 等价 `memory_remember`（auto scope）
 - `/memory` —— 一行状态：全局几条、当前项目几条、数据目录
+- `/persona <名字或 id>` —— 切换默认角色卡；不带参数列出所有卡（当前那张前面带 `*`）
 
 ---
 
@@ -220,13 +239,23 @@ tags: ["插件","api"]
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/persona` | `{ name, body, updated }` |
-| PUT | `/persona` | 保存 `{ name, body }`，返回保存后的对象 |
+| GET | `/personas` | `{ items: [{ id, name, body, created, updated }], activeId }`（**带 body**，界面要预览） |
+| POST | `/personas` | 新建 `{ name }` → 卡对象；正文默认 `我是 <name>。` |
+| PUT | `/personas/:id` | 保存 `{ name?, body? }` → 卡对象；id 不变 |
+| DELETE | `/personas/:id` | 删除 → `{ ok:true, activeId }`；只剩一张时 400 + `至少保留一张角色卡` |
+| POST | `/personas/:id/default` | 设为默认 → `{ ok:true, activeId }` |
+| GET | `/persona` | 兼容旧面板：等价「返回 active 那张卡」`{ name, body, updated }` |
+| PUT | `/persona` | 兼容旧面板：等价「保存 active 那张卡」 |
 | GET | `/memory?scope=global\|project&project=<cwd\|slug>` | 条目列表（`id/scope/summary/text/date/tags`） |
 | POST | `/memory` | 新增 `{ text, title?, scope?, project?, tags? }` |
 | DELETE | `/memory/:id` | 删除；不存在返回 404 + 明确错误 |
+| GET | `/memory/raw?scope=global` | 全局记忆文件原文 `{ scope, path, text }` |
+| PUT | `/memory/raw` | 原子写回原文 `{ scope:'global', text }` → `{ ok:true, path, text }`；允许空串 |
 | GET | `/status` | 数据目录、条目数、当前项目 slug |
 | GET | `/health` | `{ ok: true, dataDir }` |
+
+`PUT /memory/raw` **不校验格式**（用户可能手写一半就先存），写完让注入段的 mtime 缓存失效，
+下一轮就是新内容；结构写坏的后果只是「这份读不出条目」，插件不会报错。
 
 路由用宿主原生的 `ctx.webServer.register({ kind: 'prefix', path, handler })`，
 handler 直接吃 `(req, res)`（pathname 的 prefix 部分在 handler 里自己裁掉），**不引 express/koa**。
@@ -236,7 +265,7 @@ handler 直接吃 `(req, res)`（pathname 的 prefix 部分在 handler 里自己
 ## 7. 开发
 
 ```bash
-node --test test/        # 36 个用例：store / project / 插件接线
+node --test test/        # 51 个用例：store / personas / project / 插件接线
 ```
 
 - `lib/host/index.js` —— 插件入口：Config、注入、段、工具、命令、HTTP

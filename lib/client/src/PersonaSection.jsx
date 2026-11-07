@@ -11,7 +11,7 @@
  * 这样左边那张卡的显示名能跟着变，不需要二次拉接口。
  */
 import * as React from 'react';
-import { savePersona } from './api.js';
+import { updatePersona } from './personas.js';
 
 /** 一行「标签 + 控件」，抄自原插件 UserProfileTab 的四个 SETTING_* 常量（照抄值，不 import 组件） */
 const SETTING_ROW_STYLE = { display: 'flex', alignItems: 'center', gap: 10, minHeight: 34 };
@@ -79,7 +79,12 @@ export function PersonaSection({ persona, onSaved } = {}) {
     setSaving(true);
     setErr('');
     try {
-      const saved = await savePersona(next);
+      if (!persona?.id) throw new Error('没有选中角色卡');
+      // 只提交真正变了的字段：改名字不该顺手把正文也写一遍（少一次整文件重写）
+      const patch = {};
+      if (next.name !== baseline.current.name) patch.name = next.name;
+      if (next.body !== baseline.current.body) patch.body = next.body;
+      const saved = await updatePersona(persona.id, patch);
       const stored = {
         name: String(saved?.name ?? next.name),
         body: String(saved?.body ?? next.body),
@@ -88,7 +93,7 @@ export function PersonaSection({ persona, onSaved } = {}) {
       // 宿主会 trim 名字 / 空名兜底，用返回值回填，避免输入框和磁盘上的内容不一致
       setName(stored.name);
       setBody(stored.body);
-      onSaved?.({ ...stored, updated: Number(saved?.updated) || 0 });
+      onSaved?.({ ...stored, id: persona.id, updated: Number(saved?.updated) || 0 });
       setFlash('已自动保存');
       if (flashTimer.current) clearTimeout(flashTimer.current);
       flashTimer.current = setTimeout(() => {
