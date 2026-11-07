@@ -1,0 +1,6 @@
+# Bundle 层：profile 启用 @local/dsh-my-memory 时自动加载本文件。
+# 这里只插一行，默认值全部写在 lib/host/index.js 的 Config schema 里
+# （config 写在这里会变成「用户改了 schema 默认值但这行没改」的第二份默认值，必然漂移）。
+- insert:
+    - id: my-memory
+      name: '@local/dsh-my-memory'
