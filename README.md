@@ -99,7 +99,7 @@ soul-md 是 `memory_append / read / search / rewrite`），但语义重叠会让
   baby/agent.md                  一个角色一个目录，目录名 = 角色 id
   cat/agent.md
   state/personas.json            { "activeId": "baby" } 当前用哪个角色
-  state/sessions.json            会话 → 角色卡的绑定（建会话时选，之后锁死）
+  state/sessions.json            会话 → 角色卡的绑定（随时可改）
   state/projects.json            哪些目录开着「局部记忆」的开关
   MEMORY.md                      全局记忆（单文件，只装通用/人相关内容）
   projects/<slug>/…              **旧版**项目记忆（保留不删、不自动迁移，见下）
@@ -189,7 +189,7 @@ updated: 1762146000000
 
 | 段名 | 段序 | 内容 |
 | --- | --- | --- |
-| `my-memory:persona` | `personaOrder`（1.1） | **当前会话绑定的卡**（没绑定才用 activeId），超预算截断加 `…` |
+| `my-memory:persona` | `personaOrder`（1.1） | **当前会话绑定的卡**（没绑定才用 activeId；绑定随时可改），超预算截断加 `…` |
 | `my-memory:context` | `order`（1.2） | 全局记忆全文（头尾裁剪）+ 当前目录的局部记忆（头尾裁剪；开关关着就不注入） |
 
 角色卡段形如：
@@ -259,8 +259,8 @@ updated: 1762146000000
 | POST | `/personas/:id/rename` | 重命名磁盘上的角色目录 `{ dir }` → 卡对象（`id`/`display` 已是新目录）；整个目录一起搬（头像等一并跟着走）；同名幂等、重名 400「这个目录已经有了」、非法名 400、源不存在 404，active 时 activeId 跟着改 |
 | GET | `/persona` | 兼容旧面板：等价「返回 active 那张卡」`{ name, body, updated }` |
 | PUT | `/persona` | 兼容旧面板：等价「保存 active 那张卡」 |
-| GET | `/session/persona?session=<id>` | `{ sessionId, personaId, name, locked }`；没绑过 → `personaId:null, locked:false` |
-| POST | `/session/persona` | 绑定 `{ session, personaId }`；换卡 → **409**「会话已经建立，角色不能切换」；同卡幂等 200；未知卡 404 |
+| GET | `/session/persona?session=<id>` | `{ sessionId, personaId, name, locked }`；没绑过 → `personaId:null`；**`locked` 恒为 false**（字段留着做客户端兼容，随时都能改绑） |
+| POST | `/session/persona` | 绑定/改绑 `{ session, personaId }`，**永远 200**（没有「锁定」这套逻辑）；换卡会更新 `boundAt`，同卡幂等；未知卡 404 |
 | GET | `/project/state?cwd=<绝对路径>` | `{ cwd, memoryPath, exists, enabled, hasLegacy }` |
 | POST | `/project/state` | 开关 `{ cwd, enabled }`；打开顺手建文件，关闭**只写状态、不删不改** |
 | GET | `/settings` | `{ dataDir, defaultDataDir, folderName }`（`folderName` = `dsh-my-memory`，客户端显示用） |

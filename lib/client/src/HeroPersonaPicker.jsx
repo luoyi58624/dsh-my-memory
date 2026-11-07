@@ -7,8 +7,7 @@
  * 几条硬约束：
  * - **sessionId 拿不到就整条不渲染** —— 没有会话就无从绑定，渲染一个点了没用的控件更糟。
  * - 菜单必须 portal + fixed：它下面就是输入框区域，absolute 会被裁。
- * - 会话一旦建立（locked 或 409），菜单照旧能打开看，但所有项 disabled ——
- *   「能看见可选项」和「能改」是两件事，藏起来会让人以为没配好。
+ * - 不锁角色：会话建好之后只要还能回到这页就还能改，跟原插件一致。
  */
 import * as React from 'react';
 import * as ReactDOM from 'react-dom';
@@ -126,11 +125,11 @@ function PickerInner({ sessionId }) {
     };
   }, [open, place]);
 
-  const locked = Boolean(bound?.locked) || Boolean(err);
+  // 不锁：原插件本来就没有「建完会话不许换」这套，角色随时可以改。
   const label = bound?.name || '选择角色';
 
   async function choose(persona) {
-    if (locked || busy) return;
+    if (busy) return;
     if (persona.id === bound?.personaId) {
       setOpen(false);
       return;
@@ -143,22 +142,10 @@ function PickerInner({ sessionId }) {
         sessionId,
         personaId: String(res?.personaId ?? persona.id),
         name: String(res?.name ?? persona.name ?? ''),
-        locked: res?.locked === undefined ? true : !!res.locked,
       });
       setOpen(false);
     } catch (e) {
-      if (e?.status === 409) {
-        // 会话已经建立：菜单**不关**，红字说明，所有项变不可点
-        setErr('会话已经建立，角色不能切换');
-        try {
-          const sp = await fetchSessionPersona(sessionId);
-          setBound(sp);
-        } catch {
-          /* 拿不到就沿用原来的绑定 */
-        }
-      } else {
-        setErr(`绑定失败：${e?.message || e}`);
-      }
+      setErr(`绑定失败：${e?.message || e}`);
     } finally {
       setBusy(false);
     }
@@ -198,7 +185,7 @@ function PickerInner({ sessionId }) {
                       aria-selected={active}
                       className="dsh-mymem-heroitem"
                       data-active={active ? '1' : '0'}
-                      disabled={locked || busy}
+                      disabled={busy}
                       onClick={() => void choose(p)}
                     >
                       <span className="dsh-mymem-heroitem-main">
@@ -211,7 +198,6 @@ function PickerInner({ sessionId }) {
                 })}
                 {personas && personas.length === 0 ? <div className="dsh-mymem-heromenu-hint">还没有角色卡</div> : null}
               </div>
-              {locked ? <div className="dsh-mymem-heromenu-hint">会话建立后角色不可更改</div> : null}
             </div>,
             document.body,
           )

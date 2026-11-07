@@ -745,7 +745,7 @@ async function withSandboxHome(run) {
 }
 
 
-test('HTTP · 会话级角色绑定：首绑 / 换卡 409 / 同卡幂等 / 未知卡 404 / 注入用绑定的卡', async () => {
+test('HTTP · 会话级角色绑定：首绑 / 换卡成功 / 同卡幂等 / 未知卡 404 / locked 恒 false / 注入用绑定的卡', async () => {
   const { ctx, api, dir } = await startPlugin();
   try {
     await api('POST', '/personas', { dir: 'cat' });
@@ -757,7 +757,7 @@ test('HTTP · 会话级角色绑定：首绑 / 换卡 409 / 同卡幂等 / 未�
     await api('POST', '/personas/cat/default');
     assert.ok(first);
 
-    // 未绑定时
+    // 未绑定时：locked 必须是 false（新建会话页还能随便挑）
     const before = await api('GET', '/session/persona?session=sess-1');
     assert.equal(before.status, 200);
     assert.deepEqual(
@@ -769,22 +769,26 @@ test('HTTP · 会话级角色绑定：首绑 / 换卡 409 / 同卡幂等 / 未�
     const bound = await api('POST', '/session/persona', { session: 'sess-1', personaId: 'baby' });
     assert.equal(bound.status, 200);
     assert.equal(bound.body.personaId, 'baby');
-    assert.equal(bound.body.locked, true);
+    assert.equal(bound.body.locked, false, '任何时候都可以改，locked 恒 false');
 
-    // 换卡 → 409
-    const conflict = await api('POST', '/session/persona', { session: 'sess-1', personaId: 'cat' });
-    assert.equal(conflict.status, 409);
-    assert.equal(conflict.body.error, '会话已经建立，角色不能切换');
+    // 换卡 → 永远 200，且真的换了
+    const changed = await api('POST', '/session/persona', { session: 'sess-1', personaId: 'cat' });
+    assert.equal(changed.status, 200);
+    assert.equal(changed.body.personaId, 'cat');
+    const readBack = await api('GET', '/session/persona?session=sess-1');
+    assert.equal(readBack.body.personaId, 'cat');
+    assert.equal(readBack.body.locked, false);
 
     // 同卡再绑 → 200 幂等
-    const again = await api('POST', '/session/persona', { session: 'sess-1', personaId: 'baby' });
+    const again = await api('POST', '/session/persona', { session: 'sess-1', personaId: 'cat' });
     assert.equal(again.status, 200);
 
     // 未知卡 → 404
     const missing = await api('POST', '/session/persona', { session: 'sess-2', personaId: 'ghost' });
     assert.equal(missing.status, 404);
 
-    // 注入用的是「会话绑定的卡」，不是 active（当前 active 是 cat）
+    // 注入用的是会话绑定的卡（现在绑的是 cat），不是 active（active 也是 cat，所以再换回 baby 验证）
+    await api('POST', '/session/persona', { session: 'sess-1', personaId: 'baby' });
     const boundText = renderSection(ctx, 'my-memory:persona', {
       agent: { session: { id: 'sess-1' } },
     });

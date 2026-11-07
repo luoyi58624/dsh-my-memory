@@ -47,8 +47,9 @@ test('parseProjectStateMap / normalizeProjectCwd：只认 enabled 是布尔的�
   assert.equal(normalizeProjectCwd('D:\\Repo\\Sub\\'), normalizeProjectCwd('D:/repo/sub'));
 });
 
-test('会话绑定：首绑成功 → 再换卡冲突 → 同卡幂等 → 未知卡 404', async () => {
-  const { dir, store } = await tempStore({ now: () => 1762146000000 });
+test('会话绑定：首绑成功 → 换卡成功（覆盖） → 同卡幂等 → 未知卡 404', async () => {
+  let clock = 1762146000000;
+  const { dir, store } = await tempStore({ now: () => clock });
   try {
     await makeCard(dir, 'baby', '大肥鱼');
     await makeCard(dir, 'cat', '小猫娘');
@@ -61,16 +62,22 @@ test('会话绑定：首绑成功 → 再换卡冲突 → 同卡幂等 → 未�
     const saved = JSON.parse(await readFile(join(dir, 'state', 'sessions.json'), 'utf8'));
     assert.deepEqual(saved, { s1: { personaId: 'baby', boundAt: 1762146000000 } });
 
-    // 换一张 → 冲突
-    const conflict = await store.bindSessionPersona('s1', 'cat');
-    assert.equal(conflict.ok, false);
-    assert.equal(conflict.conflict, true);
-    assert.equal(conflict.personaId, 'baby', '冲突时要告诉调用方现在绑的是谁');
+    // 换一张 → 直接覆盖成功（任何时候都能改，没有「锁死」）
+    clock += 1000;
+    const changed = await store.bindSessionPersona('s1', 'cat');
+    assert.equal(changed.ok, true);
+    assert.equal(changed.personaId, 'cat');
+    assert.equal(changed.boundAt, 1762146001000, '换成新的一张要更新 boundAt');
+    assert.equal(
+      JSON.parse(await readFile(join(dir, 'state', 'sessions.json'), 'utf8')).s1.personaId,
+      'cat',
+      '改绑必须真的落盘',
+    );
 
-    // 同一个 id 再来一次 → 幂等成功，boundAt 不变
-    const again = await store.bindSessionPersona('s1', 'baby');
+    // 同一个 id 再来一次 → 幂等，boundAt 不变
+    const again = await store.bindSessionPersona('s1', 'cat');
     assert.equal(again.ok, true);
-    assert.equal(again.boundAt, 1762146000000);
+    assert.equal(again.boundAt, 1762146001000);
 
     // 未知卡 / 空参数
     await assert.rejects(store.bindSessionPersona('s2', 'ghost'), (err) => err.status === 404);
@@ -79,8 +86,8 @@ test('会话绑定：首绑成功 → 再换卡冲突 → 同卡幂等 → 未�
 
     // 同步读（注入路径）
     clearSyncCache();
-    assert.equal(store.sessionPersonaIdSync('s1'), 'baby');
-    assert.equal(store.sessionPersonaCardSync('s1').name, '大肥鱼');
+    assert.equal(store.sessionPersonaIdSync('s1'), 'cat');
+    assert.equal(store.sessionPersonaCardSync('s1').name, '小猫娘');
     assert.equal(store.sessionPersonaIdSync('unknown'), null);
     assert.equal(store.sessionPersonaCardSync('unknown'), null);
   } finally {
