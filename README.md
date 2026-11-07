@@ -55,6 +55,17 @@ profile 侧只要让 `@local/dsh-my-memory` 作为一个 bundle 被加载即可�
 - 命令：`/memory` 应当输出「全局记忆 N 条 / 项目记忆 M 条 / 数据目录」
 - 工具：模型侧应能看到 `memory_remember / memory_recall / memory_forget / memory_list`
 
+### 1.4 和 dsh-soul-md 的关系（重要）
+
+ 也提供角色卡（ 段）和长期记忆（ 工具）。两者同时启用会出现
+**两段角色设定 + 两套记忆工具**，上下文里互相矛盾。二选一：
+
+- 用本插件：在 profile 的  里给  加一行 （config 留着，想回去改回  即可）
+- 只用 soul-md 的记忆、保留它的人格：把本插件的  设成 ，角色卡段就不注入了
+
+工具名不冲突（本插件是 ，soul-md 是 ），
+但语义重叠，模型会两边都写，所以还是建议二选一。
+
 ---
 
 ## 2. 配置
