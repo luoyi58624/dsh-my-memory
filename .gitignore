@@ -1,0 +1,10 @@
+# 依赖（本地只为跑 node --test 放了一个 schemastery 的 junction，不进球）
+node_modules/
+
+# 临时/调试产物
+.tmp-*
+*.log
+
+# 注意：lib/client/index.js 是构建产物，但**故意入库**。
+# 这个插件按本地 link 方式安装，没有安装期构建步骤，
+# 入库才能保证「拉下来就能被 profile 加载」。改源码后跑 node scripts/build-client.mjs 再提交。
