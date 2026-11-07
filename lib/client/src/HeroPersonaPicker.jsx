@@ -52,6 +52,7 @@ function PickerInner({ sessionId }) {
   const [err, setErr] = React.useState('');
   const [busy, setBusy] = React.useState(false);
   const btnRef = React.useRef(null);
+  const menuRef = React.useRef(null);
 
   React.useEffect(() => {
     ensureStyle();
@@ -78,20 +79,35 @@ function PickerInner({ sessionId }) {
     };
   }, [sessionId]);
 
-  /** 菜单坐标：贴着按钮下方，贴边时往回翻 */
+  /**
+   * 菜单坐标：贴着按钮下方，贴边时往回翻。
+   *
+   * 宽度**不写死** —— 菜单内容只有一行角色名，写死宽度会白白撑出一大片空。
+   * 交给 CSS 的 `width:max-content`（带 min/max）自己量，这里只负责把量出来的
+   * 实际尺寸夹回视口内；所以挂载后要再量一次，第一次只能用按钮位置粗放。
+   */
   const place = React.useCallback(() => {
     const el = btnRef.current;
     if (!el) return;
     const r = el.getBoundingClientRect();
-    const W = 380;
     const vw = window.innerWidth || 0;
     const vh = window.innerHeight || 0;
-    const left = Math.max(8, Math.min(r.left, vw - W - 8));
-    // 下面放不下就往上翻（新建会话页按钮往往贴近输入区底部）
-    const below = r.bottom + 6;
-    const top = below + 320 > vh ? Math.max(8, r.top - 6 - 320) : below;
-    setPos({ left, top, width: W });
+    const mw = menuRef.current?.offsetWidth || 0;
+    const mh = menuRef.current?.offsetHeight || 0;
+
+    let left = r.left;
+    if (mw && left + mw > vw - 8) left = Math.max(8, vw - 8 - mw);
+
+    let top = r.bottom + 6; // 下面放不下就往上翻（新建会话页按钮往往贴近输入区底部）
+    if (mh && top + mh > vh - 8) top = Math.max(8, r.top - 6 - mh);
+
+    setPos((prev) => (prev && prev.left === left && prev.top === top ? prev : { left, top }));
   }, []);
+
+  React.useLayoutEffect(() => {
+    if (!open) return;
+    place();
+  }, [open, pos?.left, pos?.top, place]);
 
   React.useEffect(() => {
     if (!open) return undefined;
@@ -164,7 +180,7 @@ function PickerInner({ sessionId }) {
 
       {open && pos && typeof document !== 'undefined'
         ? ReactDOM.createPortal(
-            <div className="dsh-mymem-heromenu" style={{ position: 'fixed', left: pos.left, top: pos.top, width: pos.width }}>
+            <div ref={menuRef} className="dsh-mymem-heromenu" style={{ position: 'fixed', left: pos.left, top: pos.top }}>
               {err ? <div className="dsh-mymem-heromenu-err">{err}</div> : null}
               <div className="dsh-mymem-heromenu-list" role="listbox">
                 {(personas || []).map((p) => {
