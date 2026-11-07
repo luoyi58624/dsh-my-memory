@@ -26,14 +26,6 @@ function sessionIdFromProps(props) {
   );
 }
 
-/** 取角色信息的第一行，当菜单里的说明 */
-function firstLine(body) {
-  const s = String(body ?? '').trim();
-  if (!s) return '';
-  const line = s.split('\n').map((x) => x.trim()).find(Boolean) || '';
-  return line.replace(/^[「【\[]?[^」】\]]{0,6}[」】\]]?\s*/, '').trim() || line;
-}
-
 function PersonaIcon({ size = 14 }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -190,7 +182,6 @@ function PickerInner({ sessionId }) {
                     >
                       <span className="dsh-mymem-heroitem-main">
                         <span className="dsh-mymem-heroitem-name">{p.name || p.id}</span>
-                        {firstLine(p.body) ? <span className="dsh-mymem-heroitem-desc">{firstLine(p.body)}</span> : null}
                       </span>
                       {active ? <span className="dsh-mymem-heroitem-check">✓</span> : null}
                     </button>
