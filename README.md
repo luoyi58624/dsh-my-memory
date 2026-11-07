@@ -57,14 +57,15 @@ profile 侧只要让 `@local/dsh-my-memory` 作为一个 bundle 被加载即可�
 
 ### 1.4 和 dsh-soul-md 的关系（重要）
 
- 也提供角色卡（ 段）和长期记忆（ 工具）。两者同时启用会出现
+`soul-md` 也提供角色卡（`soul:persona` 段）和长期记忆（`memory_*` 工具）。两者同时启用会出现
 **两段角色设定 + 两套记忆工具**，上下文里互相矛盾。二选一：
 
-- 用本插件：在 profile 的  里给  加一行 （config 留着，想回去改回  即可）
-- 只用 soul-md 的记忆、保留它的人格：把本插件的  设成 ，角色卡段就不注入了
+- 用本插件：在 profile 的 `cordis.patch.yml` 里给 `- id: soul-md` 加一行 `disabled: true`
+  （它下面的 config 留着，想回去改回 `false` 即可）
+- 只用 soul-md 的记忆、保留它的人格：把本插件的 `personaBudget` 设成 `0`，角色卡段就不注入了
 
-工具名不冲突（本插件是 ，soul-md 是 ），
-但语义重叠，模型会两边都写，所以还是建议二选一。
+工具名本身不冲突（本插件是 `memory_remember / recall / forget / list`，
+soul-md 是 `memory_append / read / search / rewrite`），但语义重叠会让模型两边都写，所以还是建议二选一。
 
 ---
 
