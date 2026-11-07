@@ -593,6 +593,52 @@ test('命令 /persona：不带参数列卡，带参切默认', async () => {
   }
 });
 
+test('启动迁移：已有旧 persona.md → 自动生成 personas/ 并被注入段读到', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-my-memory-migrate-'));
+  const ctx = makeCtx();
+  const cwd = join(dir, 'workspace');
+  await mkdir(cwd, { recursive: true });
+  ctx.workingDirectory = { get: () => cwd, defaultDirectory: cwd };
+  try {
+    // 旧版本留下的单卡文件（只有 name/updated 两字段）
+    await writeFile(
+      join(dir, 'persona.md'),
+      '---\nname: 大肥鱼\nupdated: 1762000000000\n---\n\n我是大肥鱼。\n说话要柔和。\n',
+      'utf8',
+    );
+    apply(ctx, { dataDir: dir });
+    await waitFor(async () => {
+      try {
+        const index = JSON.parse(await readFile(join(dir, 'personas.json'), 'utf8'));
+        return !!(index && index.activeId);
+      } catch {
+        return false;
+      }
+    });
+    const index = JSON.parse(await readFile(join(dir, 'personas.json'), 'utf8'));
+    assert.match(index.activeId, /^p_[0-9a-f]{8}$/);
+    const cardText = await readFile(join(dir, 'personas', `${index.activeId}.md`), 'utf8');
+    assert.ok(cardText.includes('id: ' + index.activeId));
+    assert.ok(cardText.includes('name: 大肥鱼'));
+    assert.ok(cardText.includes('created: 1762000000000'));
+    // 注入段立刻是迁移出来的那张卡
+    const text = renderSection(ctx, 'my-memory:persona');
+    assert.ok(text.includes('（角色卡「大肥鱼」）'));
+    assert.ok(text.includes('说话要柔和。'));
+    // 旧文件还在
+    assert.ok((await readFile(join(dir, 'persona.md'), 'utf8')).includes('说话要柔和'));
+    // 接口上只有一张卡，且就是它
+    const route = ctx.state.routes[0];
+    const res = makeRes();
+    await route.handler(makeReq('GET', '/my-memory/api/personas'), res);
+    assert.equal(res.payload.items.length, 1);
+    assert.equal(res.payload.activeId, index.activeId);
+  } finally {
+    ctx.state.effects.forEach((d) => typeof d === 'function' && d());
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('纯函数：retainEnds / looksTechnical 的可解释判据', () => {
   assert.equal(retainEnds('短', 100), '短');
   assert.equal(retainEnds('', 10), '');
