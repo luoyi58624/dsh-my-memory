@@ -1,29 +1,51 @@
 /**
  * index.jsx —— 客户端插件入口（浏览器侧 cordis 插件）
  *
- * 两个落点，都用同一个 id `my-memory`：
- *   settings.section     list slot，scope=root    → 设置页「角色卡」一节
- *   conversation.view    list slot，scope=session → 会话标签栏「记忆」一页
+ * 落点（用同一个 id `my-memory` 把侧边栏入口和面板关联起来，外壳点图标时按 id 选中面板）：
+ *   sidebar.panellist   list slot，id=my-memory，渲染 16px 图标
+ *   main                keyed slot，key=my-memory，渲染面板
+ *   conversation.view   list slot，id=my-memory，会话标签栏里的一页「记忆」
+ *
+ * 为什么不再注册 settings.section：角色卡是「这个插件的核心」，不是一堆散装偏好里的一项，
+ * 藏在设置第三个分节里没人会翻；放侧边栏入口 = 点图标就进面板，一步到位。
  *
  * 为什么文案直接写中文而不走 locale：本插件只面向中文环境，
  * 引 locale 服务会多一个注入依赖、多一层 key 对齐，收益为零。
- *
- * 为什么每个注册都各自 try/catch：两个落点属于不同外壳版本的能力，
- * 一个槽位不存在（换布局 / 老壳）不该连带把另一个也废掉。
  */
-import { PersonaSection } from './PersonaSection.jsx';
+import { MemoryPanel } from './Panel.jsx';
+import { MemorySidebarIcon } from './icon.jsx';
 import { MemoryTab } from './MemoryTab.jsx';
 import { ensureStyle } from './styles.js';
 
 export const name = 'my-memory';
 
-/** 只需要 slots：样式自己注入、文案自己写、不碰 locale / configForms */
-export const inject = ['slots'];
+/** slots 用来注册落点，layout 用来在面板内关闭（selectPanel(null)） */
+export const inject = ['slots', 'layout'];
 
 const LOG = '[my-memory]';
 
+/** 侧边栏入口 id 与 main 槽位的 key，必须是同一个值 */
+const PANEL_ID = 'my-memory';
+
 /**
- * 往一个 list slot 注册一项。
+ * 面板导航：面板里点关闭时把主区域退回会话。
+ * layout 拿不到时静默失败（不显示关闭按钮的降级路径由 Panel 自己处理，这里只兜底）。
+ * @param {any} ctx cordis 上下文
+ */
+function createNavigation(ctx) {
+  return {
+    close() {
+      try {
+        ctx.layout.selectPanel(null);
+      } catch (err) {
+        console.warn(LOG, 'selectPanel(null) 失败', err);
+      }
+    },
+  };
+}
+
+/**
+ * 往一个 list slot 注册一项（只够处理简单 list slot）。
  *
  * 形态必须严格遵守：`slots.inject(name, fn)` 的 fn **必须返回 disposer**，
  * 整个 inject 再包一层 `ctx.effect(fn, label)`，这样插件卸载时插槽会被摘干净；
@@ -31,18 +53,19 @@ const LOG = '[my-memory]';
  *
  * @param {any} ctx cordis 上下文
  * @param {string} slotName 槽位名
+ * @param {string} id 注册 id
  * @param {number} order 排序
  * @param {() => string} label 文案
  * @param {any} Component React 组件
  * @returns {boolean} 是否注册成功
  */
-function registerSection(ctx, slotName, order, label, Component) {
+function registerSection(ctx, slotName, id, order, label, Component) {
   try {
     if (!ctx.slots || typeof ctx.slots.inject !== 'function') throw new Error('ctx.slots 不可用');
     ctx.effect(
       () =>
         ctx.slots.inject(slotName, () =>
-          ctx.slots.register({ name: slotName, id: 'my-memory', order, label }, Component),
+          ctx.slots.register({ name: slotName, id, order, label }, Component),
         ),
       `my-memory.${slotName}`,
     );
@@ -55,15 +78,77 @@ function registerSection(ctx, slotName, order, label, Component) {
 }
 
 /**
+ * 注册侧边栏入口 + 主面板。
+ *
+ * 这两个必须在**同一条 inject 链**里注册：外壳要求 `main` 的 key 与侧边栏的 id 成对出现，
+ * 只挂上其中一个会出现「有图标点不开」或「面板挂在那儿没有入口」的半截状态。
+ * 所以任何一半失败，都把已经挂上的另一半摘掉再抛。
+ *
+ * @param {any} ctx cordis 上下文
+ * @param {{close: () => void}} navigation
+ * @returns {boolean}
+ */
+function registerSidebarPanel(ctx, navigation) {
+  try {
+    if (!ctx.slots || typeof ctx.slots.inject !== 'function') throw new Error('ctx.slots 不可用');
+    ctx.effect(
+      () =>
+        ctx.slots.inject('main', () =>
+          ctx.slots.inject('sidebar.panellist', () => {
+            const stopMain = ctx.slots.register(
+              // inject 把外壳的关闭回调交给面板；面板拿不到就自己降级隐藏关闭按钮
+              { name: 'main', key: PANEL_ID, inject: () => ({ close: navigation.close }) },
+              MemoryPanel,
+            );
+            let stopIcon = null;
+            try {
+              stopIcon = ctx.slots.register(
+                { name: 'sidebar.panellist', id: PANEL_ID, order: 43, label: () => '记忆' },
+                MemorySidebarIcon,
+              );
+            } catch (err) {
+              // 图标没挂上就等于没有入口，留着面板只会让人以为插件坏了
+              try {
+                stopMain();
+              } catch {
+                /* 卸载不抛 */
+              }
+              throw err;
+            }
+            return () => {
+              try {
+                stopIcon();
+              } finally {
+                try {
+                  stopMain();
+                } catch {
+                  /* 卸载不抛 */
+                }
+              }
+            };
+          }),
+        ),
+      'my-memory.sidebar',
+    );
+    console.info(LOG, '已注册侧边栏入口与记忆面板');
+    return true;
+  } catch (err) {
+    console.warn(LOG, '注册侧边栏入口/主面板失败（不影响会话内「记忆」页）', err);
+    return false;
+  }
+}
+
+/**
  * 插件工厂。
  * @param {any} ctx cordis 上下文
  */
 export function apply(ctx) {
-  // 样式在这里注入一次即可：两个界面都只依赖这一张样式表，且注入是幂等的
+  // 样式在这里注入一次即可：所有界面都只依赖这一张样式表，且注入是幂等的
   ensureStyle();
 
-  // 角色卡：设置页里的一节
-  registerSection(ctx, 'settings.section', 60, () => '角色卡', PersonaSection);
-  // 记忆：会话标签栏里的一页
-  registerSection(ctx, 'conversation.view', 40, () => '记忆', MemoryTab);
+  // 1) 侧边栏入口 + 主面板（角色卡 / 全局·项目记忆）
+  registerSidebarPanel(ctx, createNavigation(ctx));
+
+  // 2) 会话标签栏里的一页「记忆」：两个落点互不依赖，各自 try/catch
+  registerSection(ctx, 'conversation.view', PANEL_ID, 40, () => '记忆', MemoryTab);
 }
