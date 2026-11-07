@@ -1,4 +1,4 @@
-// 单测 · 插件接线（段注册 / 工具 / 命令 / HTTP / 注入字节稳定性）
+// 单测 · 插件接线（段注册 / 命令 / HTTP / 注入字节稳定性）
 //
 // 这里用一个假 ctx 跑真实的 apply()：假如只测 store，接线写错（段名、interpolate、
 // handler 形状）照样测不出来，而那正是最容易让插件「加载成功但什么都不生效」的地方。
@@ -9,20 +9,31 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { apply, Config, inject, looksTechnical, name, retainEnds, revealCommandOf } from '../lib/host/index.js';
-import { contentRev } from '../lib/host/store.js';
+import { contentRev, DEFAULT_AGENT_PROMPT } from '../lib/host/store.js';
 import { clearDetectCache } from '../lib/host/project.js';
 import { clearSyncCache } from '../lib/host/atomic.js';
 
 /** 假 cordis 上下文：记录所有注册，供断言 */
 function makeCtx() {
-  const state = { sections: [], tools: new Map(), commands: new Map(), routes: [], effects: [] };
+  const state = {
+    sections: [],
+    tools: new Map(),
+    commands: new Map(),
+    routes: [],
+    effects: [],
+    services: new Map(),
+  };
   const ctx = {
     state,
     logger: { info() {}, warn() {}, error() {}, debug() {} },
     workingDirectory: null,
     get(serviceName) {
       if (serviceName === 'workingDirectory') return ctx.workingDirectory;
-      return undefined;
+      return state.services.get(serviceName);
+    },
+    provide(serviceName, value) {
+      state.services.set(serviceName, value);
+      return () => state.services.delete(serviceName);
     },
     systemPrompt: {
       section(definition) {
@@ -102,11 +113,15 @@ async function startPlugin(config = {}) {
   ctx.workingDirectory = { get: () => cwd, defaultDirectory: cwd };
   // 指针文件也指到临时目录：绝不能因为跑测试就改掉用户真实的 ~/.dsh/my-memory.roots.json
   apply(ctx, { dataDir: dir, rootPointerFile: join(dir, '.roots.json'), ...config });
-  // 启动引导是异步的（建目录 + 迁移/建默认卡 + 写 state/personas.json），等它落盘避免断言抢跑
+  // 启动引导是异步的（建目录 + 迁移/建默认卡 + 写 state/personas.json + 建 AGENT.md），
+  // 等它落盘避免断言抢跑。必须等到 AGENT.md 也出现：Windows 上测试结束得比引导快时，
+  // 清理用的 rm(dir) 会和还在进行的写文件撞车（EBUSY: resource busy or locked）。
   await waitFor(async () => {
     try {
       const index = JSON.parse(await readFile(join(dir, 'state', 'personas.json'), 'utf8'));
-      return !!(index && index.activeId);
+      if (!(index && index.activeId)) return false;
+      await stat(join(dir, 'AGENT.md'));
+      return true;
     } catch {
       return false;
     }
@@ -144,7 +159,7 @@ function renderSection(ctx, sectionName, assembly = { agent: { session: { id: 's
 
 test('模块导出与 Config 形状：四件套齐全，字段都有默认值', () => {
   assert.equal(name, 'my-memory');
-  assert.deepEqual(inject, ['webServer', 'systemPrompt', 'tools']);
+  assert.deepEqual(inject, ['webServer', 'systemPrompt']);
   assert.equal(typeof apply, 'function');
   assert.equal(typeof Config, 'function');
   // 每个字段都在 schema 里有 default（用 volatile 之外的调用方式验证不了默认值，
@@ -167,21 +182,45 @@ test('注册：两段（persona/context）都 interpolate:false，且没有 comp
     // 段序：角色卡在记忆之前
     assert.ok(persona.order < context.order);
     assert.equal(context.order, 1.2);
-    // 工具 4 个，名字不与 soul-md 冲突
-    assert.deepEqual([...ctx.state.tools.keys()].sort(), [
-      'memory_forget',
-      'memory_list',
-      'memory_recall',
-      'memory_remember',
-    ]);
-    for (const banned of ['memory_append', 'memory_read', 'memory_search', 'memory_rewrite', 'soul_read', 'soul_update']) {
-      assert.ok(!ctx.state.tools.has(banned), `不能占用 soul-md 的工具名 ${banned}`);
-    }
+    // 本版不再向模型注册 memory_* 工具（改由 /remember 命令与注入提供）
+    assert.equal(ctx.state.tools.size, 0);
     // 命令与路由
     assert.ok(ctx.state.commands.has('remember'));
     assert.ok(ctx.state.commands.has('memory'));
     assert.equal(ctx.state.routes[0].kind, 'prefix');
     assert.equal(ctx.state.routes[0].path, '/my-memory/api');
+  } finally {
+    ctx.state.effects.forEach((d) => typeof d === 'function' && d());
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('服务：把两段的拼装函数暴露成 myMemoryPrompt（预设内插件靠它拼唯一提示词）', async () => {
+  const { ctx, dir } = await startPlugin();
+  try {
+    const service = ctx.state.services.get('myMemoryPrompt');
+    assert.ok(service, 'myMemoryPrompt 必须提供给 preset-solo 用');
+    assert.equal(typeof service.personaText, 'function');
+    assert.equal(typeof service.contextText, 'function');
+    // 必须是「同一个函数」的输出：预设内拼出来的文本要和标准模式下两段注入的文本逐字节一致，
+    // 否则聊天模式的提示词会和其它模式悄悄分叉。
+    const assembly = {};
+    assert.equal(service.personaText(assembly), renderSection(ctx, 'my-memory:persona', assembly));
+    assert.equal(service.contextText(assembly), renderSection(ctx, 'my-memory:context', assembly));
+    // 两份「裸原料」：聊天模式（preset-solo 的 complete 段）要求一句多余的话都不写，
+    // 所以它拿裸正文自己拼；这里断言裸字段确实裸（无标题、无介绍句、不含 AGENT.md）。
+    assert.equal(typeof service.personaRaw, 'function');
+    assert.equal(typeof service.memoryRaw, 'function');
+    const personaRaw = service.personaRaw(assembly);
+    const memoryRaw = service.memoryRaw(assembly);
+    assert.equal(personaRaw.includes('# 角色设定'), false);
+    assert.equal(personaRaw.includes('# 全局对话要求'), false);
+    assert.equal(personaRaw.includes('你现在扮演这个角色'), false);
+    assert.equal(memoryRaw.includes('# 长期记忆（全局）'), false);
+    assert.equal(memoryRaw.includes('# 项目记忆'), false);
+    // 裸正文必须是成品文本里的那一份（复用同一批已读数据，不是另读一次文件拼出来的第二份）
+    if (personaRaw) assert.ok(service.personaText(assembly).includes(personaRaw));
+
   } finally {
     ctx.state.effects.forEach((d) => typeof d === 'function' && d());
     await rm(dir, { recursive: true, force: true });
@@ -204,6 +243,91 @@ test('角色卡段：默认空卡 / 保存后生效 / 超预算截断加省略�
     const got = await api('GET', '/persona');
     assert.equal(got.body.name, '大肥鱼');
     assert.equal(got.body.body, '一二三四五六七八九十十一十二');
+  } finally {
+    ctx.state.effects.forEach((d) => typeof d === 'function' && d());
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+/** 等某个文件出现（启动引导是异步的） */
+async function waitForFile(file, timeoutMs = 2000) {
+  await waitFor(async () => {
+    try {
+      await stat(file);
+      return true;
+    } catch {
+      return false;
+    }
+  }, timeoutMs);
+}
+
+test('全局提示词：启动后在数据根建出 AGENT.md，默认值直接注入角色卡段', async () => {
+  const { ctx, dir } = await startPlugin();
+  try {
+    const promptFile = join(dir, 'AGENT.md');
+    await waitForFile(promptFile);
+    // 文件内容是提示词本体：没有 frontmatter、没有标题
+    assert.equal(await readFile(promptFile, 'utf8'), `${DEFAULT_AGENT_PROMPT}\n`);
+    // 没改过就直接用默认值注入，且不挑会话（所有角色通用）
+    const text = renderSection(ctx, 'my-memory:persona', { agent: { session: { id: 'sess-x' } } });
+    assert.ok(text.includes('# 全局对话要求'), text);
+    assert.ok(text.includes(DEFAULT_AGENT_PROMPT), text);
+  } finally {
+    ctx.state.effects.forEach((d) => typeof d === 'function' && d());
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('全局提示词：PUT /settings/prompt 保存生效，空串 = 整节不再注入', async () => {
+  const { ctx, api, dir } = await startPlugin();
+  try {
+    await waitForFile(join(dir, 'AGENT.md'));
+    const got = await api('GET', '/settings/prompt');
+    assert.equal(got.status, 200);
+    assert.equal(got.body.path, join(dir, 'AGENT.md'));
+    // 返回的是文件原文（建文件时末尾补了一个换行，方便编辑器打开）
+    assert.equal(String(got.body.text).trim(), DEFAULT_AGENT_PROMPT);
+    assert.equal(got.body.defaultText, DEFAULT_AGENT_PROMPT);
+    assert.equal(got.body.exists, true);
+
+    const saved = await api('PUT', '/settings/prompt', { text: '只说实话。' });
+    assert.equal(saved.status, 200);
+    assert.equal(saved.body.ok, true);
+    assert.equal(await readFile(join(dir, 'AGENT.md'), 'utf8'), '只说实话。');
+    const afterSave = renderSection(ctx, 'my-memory:persona', {
+      agent: { session: { id: 'sess-x' } },
+    });
+    assert.ok(afterSave.includes('只说实话。'), afterSave);
+    assert.ok(!afterSave.includes(DEFAULT_AGENT_PROMPT), '改过之后不该再注入默认值');
+
+    // 清空 = 用户不要这段：整节消失（不是注入空标题）
+    const cleared = await api('PUT', '/settings/prompt', { text: '' });
+    assert.equal(cleared.status, 200);
+    const afterClear = renderSection(ctx, 'my-memory:persona', {
+      agent: { session: { id: 'sess-x' } },
+    });
+    assert.ok(!afterClear.includes('# 全局对话要求'), afterClear);
+    // 角色卡段本身还在
+    assert.ok(afterClear.includes('# 角色设定'), afterClear);
+
+    // 非字符串 / 超长都要拒绝
+    assert.equal((await api('PUT', '/settings/prompt', { text: 1 })).status, 400);
+    assert.equal((await api('PUT', '/settings/prompt', { text: 'x'.repeat(4001) })).status, 400);
+  } finally {
+    ctx.state.effects.forEach((d) => typeof d === 'function' && d());
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('全局提示词：用户直接改 AGENT.md 也生效（不经面板）', async () => {
+  const { ctx, dir } = await startPlugin();
+  try {
+    await waitForFile(join(dir, 'AGENT.md'));
+    // 模拟用户用编辑器改文件：长度和默认值不同，mtime+size 缓存必然失效
+    await writeFile(join(dir, 'AGENT.md'), '手改的提示词：别自称模型。\n', 'utf8');
+    const text = renderSection(ctx, 'my-memory:persona', { agent: { session: { id: 'sess-x' } } });
+    assert.ok(text.includes('手改的提示词：别自称模型。'), text);
+    assert.ok(!text.includes(DEFAULT_AGENT_PROMPT), '手改之后默认值不该再出现');
   } finally {
     ctx.state.effects.forEach((d) => typeof d === 'function' && d());
     await rm(dir, { recursive: true, force: true });
@@ -328,43 +452,6 @@ test('HTTP：列表 / 状态 / 删除，删除不存在的 id 返回 404', async
   }
 });
 
-test('工具：remember / recall / list / forget 全链路', async () => {
-  const { ctx, dir } = await startPlugin();
-  try {
-    const remember = ctx.state.tools.get('memory_remember');
-    const exec = { agent: { session: { id: 's1' } } };
-    const saved = await remember.execute({ text: '主人喜欢喝冰美式', title: '口味', tags: '口味' }, exec);
-    assert.equal(saved.scope, 'global');
-    assert.match(saved.id, /^g_/);
-    const data = await readFile(saved.path, 'utf8');
-    assert.ok(data.includes('主人喜欢喝冰美式'));
-    // recall 命中
-    const recall = ctx.state.tools.get('memory_recall');
-    const hits = await recall.execute({ query: '冰美式' }, exec);
-    assert.equal(hits.count, 1);
-    assert.equal(hits.items[0].id, saved.id);
-    // 无 query = 最近 N 条
-    const recent = await recall.execute({ limit: 5 }, exec);
-    assert.equal(recent.count, 1);
-    // 不相关查询不误召回
-    assert.equal((await recall.execute({ query: '完全不相干zzz' }, exec)).count, 0);
-    // list
-    const listed = await ctx.state.tools.get('memory_list').execute({}, exec);
-    assert.equal(listed.globalCount, 1);
-    assert.equal(listed.items[0].id, saved.id);
-    // forget
-    const forgotten = await ctx.state.tools.get('memory_forget').execute({ id: saved.id }, exec);
-    assert.equal(forgotten.scope, 'global');
-    await assert.rejects(
-      ctx.state.tools.get('memory_forget').execute({ id: 'g_00000000' }, exec),
-      /找不到/,
-    );
-  } finally {
-    ctx.state.effects.forEach((d) => typeof d === 'function' && d());
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
 test('命令：/remember 写入，/memory 输出状态', async () => {
   const { ctx, dir, cwd } = await startPlugin();
   try {
@@ -414,46 +501,11 @@ test('enabled=false：完全不注册任何东西', async () => {
   }
 });
 
-test('工具 schema：parameters 是 object 根的真实 JSON Schema（不是 defineTool 的 author DSL）', async () => {
+test('工具已下线：4 个 memory_* 工具不再注册给模型', async () => {
   const { ctx, dir } = await startPlugin();
   try {
-    // DSH 只对 defineTool 做 DSL→JSON Schema 编译；直接 register 时必须自己写成 JSON Schema，
-    // 否则模型收到的参数声明是坏的。这条测试就是防回归。
-    const allowedSchemaKeys = new Set([
-      'type',
-      'oneOf',
-      'properties',
-      'required',
-      'additionalProperties',
-      'items',
-      'enum',
-      'const',
-      'description',
-      'title',
-      'default',
-      'examples',
-    ]);
-    const walk = (schema, path) => {
-      assert.ok(schema && typeof schema === 'object', `${path} 必须是对象`);
-      for (const key of Object.keys(schema)) {
-        assert.ok(allowedSchemaKeys.has(key), `${path} 出现 DSH 不支持的 schema 关键字 ${key}`);
-      }
-      if (schema.properties) {
-        for (const [name, child] of Object.entries(schema.properties)) walk(child, `${path}.${name}`);
-      }
-      if (schema.items) walk(schema.items, `${path}.items`);
-    };
-    for (const tool of ctx.state.tools.values()) {
-      assert.equal(tool.parameters.type, 'object', `${tool.name}.parameters 必须是 object 根`);
-      assert.ok(tool.parameters.properties, `${tool.name}.parameters 必须有 properties`);
-      walk(tool.parameters, `${tool.name}.parameters`);
-      walk(tool.output.schema, `${tool.name}.output.schema`);
-      assert.equal(typeof tool.output.render, 'function');
-      assert.equal(typeof tool.execute, 'function');
-    }
-    // required 必须是属性名数组（DSH 子集要求），而不是 author DSL 里的布尔
-    assert.deepEqual(ctx.state.tools.get('memory_remember').parameters.required, ['text']);
-    assert.deepEqual(ctx.state.tools.get('memory_forget').parameters.required, ['id']);
+    // 本版只保留记忆存储/注入/命令/HTTP，模型侧不再有工具入口
+    assert.equal(ctx.state.tools.size, 0);
   } finally {
     ctx.state.effects.forEach((d) => typeof d === 'function' && d());
     await rm(dir, { recursive: true, force: true });
@@ -517,8 +569,10 @@ test('HTTP · 多角色卡：删除、只剩一张拒绝、未知 id 404', async
   const { ctx, api, dir } = await startPlugin();
   try {
     const first = (await api('GET', '/personas')).body.items;
-    assert.equal(first.length, 1, '启动引导应当已经建了一张默认卡');
-    const defaultId = first[0].id;
+    // items[0] 恒为虚拟卡「空白」，真实卡从第二项开始
+    assert.deepEqual(first.map((i) => i.id), ['__none__', 'baby'], '启动引导应当已经建了一张默认卡');
+    assert.equal(first[0].virtual, true);
+    const defaultId = 'baby';
 
     // 只剩一张：拒绝，文案必须是这句（界面直接展示）
     const refused = await api('DELETE', `/personas/${defaultId}`);
@@ -533,7 +587,10 @@ test('HTTP · 多角色卡：删除、只剩一张拒绝、未知 id 404', async
     assert.equal(removed.status, 200);
     assert.equal(removed.body.ok, true);
     assert.equal(removed.body.activeId, defaultId);
-    assert.deepEqual((await api('GET', '/personas')).body.items.map((i) => i.id), [defaultId]);
+    assert.deepEqual(
+      (await api('GET', '/personas')).body.items.filter((i) => !i.virtual).map((i) => i.id),
+      [defaultId],
+    );
 
     // 未知 id
     assert.equal((await api('DELETE', '/personas/ghost')).status, 404);
@@ -569,7 +626,7 @@ test('HTTP · rename：改目录名后 GET /personas 看到新 id 与 display，
     // 列表里旧 id 消失、新 id 出现，display 也跟着变
     const list = await api('GET', '/personas');
     const ids = list.body.items.map((i) => i.id).sort();
-    assert.deepEqual(ids, ['baby', 'fish'], '默认卡 baby 还在，只改了 mycat 那张');
+    assert.deepEqual(ids, ['__none__', 'baby', 'fish'], '默认卡 baby 还在，只改了 mycat 那张');
     assert.equal(list.body.activeId, 'fish');
     const fishCard = list.body.items.find((i) => i.id === 'fish');
     assert.ok(fishCard.display.includes('fish'));
@@ -608,7 +665,133 @@ test('HTTP · rename：重名 400 / 非法目录名 400 / 源不存在 404 / 同
     assert.equal(same.body.id, 'baby');
 
     // 失败后两张卡都还在
-    assert.deepEqual((await api('GET', '/personas')).body.items.map((i) => i.id).sort(), ['baby', 'cat']);
+    assert.deepEqual((await api('GET', '/personas')).body.items.map((i) => i.id).sort(), ['__none__', 'baby', 'cat']);
+  } finally {
+    ctx.state.effects.forEach((d) => typeof d === 'function' && d());
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('空白卡：列表首位是虚拟卡，设为默认后三段提示词全空', async () => {
+  const { ctx, api, dir } = await startPlugin();
+  try {
+    const list = await api('GET', '/personas');
+    assert.equal(list.status, 200);
+    const first = list.body.items[0];
+    // 虚拟卡「空白」：id 固定、virtual:true、没有磁盘路径，永远排第一
+    assert.equal(first.id, '__none__');
+    assert.equal(first.virtual, true);
+    assert.equal(first.name, '空白');
+    assert.equal(first.body, '');
+    assert.equal(first.path, '', '虚拟卡不对应磁盘目录');
+    assert.equal(list.body.items.length, 2, '虚拟卡 + 启动时建的那张真实卡');
+    assert.equal(list.body.activeId, 'baby', '虚拟卡不参与 activeId 的默认解析');
+
+    // 先证明「非空白」状态下确实有内容可注入，否则下面的空断言没有意义
+    await api('POST', '/memory', { text: '主人叫我大肥鱼', scope: 'global' });
+    const before = renderSection(ctx, 'my-memory:persona');
+    assert.ok(before.includes('# 角色设定'));
+    assert.ok(before.includes('# 全局对话要求'));
+    assert.ok(renderSection(ctx, 'my-memory:context').includes('主人叫我大肥鱼'));
+
+    const setDefault = await api('POST', '/personas/__none__/default');
+    assert.equal(setDefault.status, 200);
+    assert.deepEqual(setDefault.body, { ok: true, activeId: '__none__' });
+    assert.equal((await api('GET', '/personas')).body.activeId, '__none__');
+
+    // 未绑定的会话跟着全局默认走 → 角色卡段（含 AGENT.md）与记忆段都必须是空串
+    const assembly = { agent: { session: { id: 'sess-unbound' } } };
+    const personaText = renderSection(ctx, 'my-memory:persona', assembly);
+    assert.equal(personaText, '');
+    assert.ok(!personaText.includes('# 角色设定'));
+    assert.ok(!personaText.includes('# 全局对话要求'));
+    assert.equal(renderSection(ctx, 'my-memory:context', assembly), '');
+
+    // 旧单卡接口也报「空白」空正文，不能悄悄回落到第一张真实卡
+    const legacy = await api('GET', '/persona');
+    assert.equal(legacy.body.name, '空白');
+    assert.equal(legacy.body.body, '');
+  } finally {
+    ctx.state.effects.forEach((d) => typeof d === 'function' && d());
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('空白卡：会话绑定优先于全局默认，切回真实卡后未绑定会话恢复注入', async () => {
+  const { ctx, api, dir } = await startPlugin();
+  try {
+    await api('POST', '/memory', { text: '主人叫我大肥鱼', scope: 'global' });
+    const realId = (await api('GET', '/personas')).body.items.find((i) => !i.virtual).id;
+    await api('POST', '/personas/__none__/default');
+
+    // 给某个会话绑定「空白」
+    const bound = await api('POST', '/session/persona', { session: 'sess-none', personaId: '__none__' });
+    assert.equal(bound.status, 200);
+    assert.deepEqual(
+      { personaId: bound.body.personaId, name: bound.body.name, inherited: bound.body.inherited },
+      { personaId: '__none__', name: '空白', inherited: false },
+    );
+    // 读回来的绑定也是「空白」，不能因为读不到目录就回落成默认卡
+    const got = await api('GET', '/session/persona?session=sess-none');
+    assert.equal(got.body.personaId, '__none__');
+    assert.equal(got.body.name, '空白');
+
+    const noneAssembly = { agent: { session: { id: 'sess-none' } } };
+    const otherAssembly = { agent: { session: { id: 'sess-other' } } };
+    assert.equal(renderSection(ctx, 'my-memory:persona', noneAssembly), '');
+    assert.equal(renderSection(ctx, 'my-memory:context', noneAssembly), '');
+    // 另一个会话没绑定，此时 active 也是 none → 同样不注入
+    assert.equal(renderSection(ctx, 'my-memory:persona', otherAssembly), '');
+    assert.equal(renderSection(ctx, 'my-memory:context', otherAssembly), '');
+
+    // active 切回真实卡：未绑定会话恢复注入，绑定 none 的会话仍然不注入（会话绑定优先）
+    await api('POST', `/personas/${realId}/default`);
+    const restored = renderSection(ctx, 'my-memory:persona', otherAssembly);
+    assert.ok(restored.includes('# 角色设定'));
+    assert.ok(restored.includes('# 全局对话要求'));
+    assert.ok(renderSection(ctx, 'my-memory:context', otherAssembly).includes('主人叫我大肥鱼'));
+    assert.equal(renderSection(ctx, 'my-memory:persona', noneAssembly), '');
+    assert.equal(renderSection(ctx, 'my-memory:context', noneAssembly), '');
+  } finally {
+    ctx.state.effects.forEach((d) => typeof d === 'function' && d());
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('空白卡：编辑类接口全部明确拒绝（4xx + 中文原因）', async () => {
+  const { ctx, api, dir } = await startPlugin();
+  try {
+    const put = await api('PUT', '/personas/__none__', { name: 'x', body: 'y' });
+    assert.equal(put.status, 400);
+    assert.match(String(put.body.error), /空白卡不能编辑/);
+
+    const del = await api('DELETE', '/personas/__none__');
+    assert.equal(del.status, 400);
+    assert.match(String(del.body.error), /空白卡不能删除/);
+
+    const reload = await api('POST', '/personas/__none__/reload');
+    assert.equal(reload.status, 400);
+    assert.match(String(reload.body.error), /空白卡不能重载/);
+
+    const rename = await api('POST', '/personas/__none__/rename', { dir: 'x' });
+    assert.equal(rename.status, 400);
+    assert.match(String(rename.body.error), /空白卡不能改名/);
+
+    const reveal = await api('POST', '/personas/__none__/reveal');
+    assert.equal(reveal.status, 400);
+    assert.match(String(reveal.body.error), /空白卡没有角色目录/);
+
+    // 虚拟 id 不能被真实目录占用
+    const create = await api('POST', '/personas', { dir: '__none__' });
+    assert.equal(create.status, 400);
+
+    // 旧单卡接口：默认是空白时拒绝写，而不是悄悄改到别的卡上
+    await api('POST', '/personas/__none__/default');
+    const legacyPut = await api('PUT', '/persona', { name: 'x' });
+    assert.equal(legacyPut.status, 400);
+    assert.match(String(legacyPut.body.error), /空白卡/);
+    // 真实卡本身没被改动
+    assert.ok((await api('GET', '/personas')).body.items.find((i) => !i.virtual).name !== 'x');
   } finally {
     ctx.state.effects.forEach((d) => typeof d === 'function' && d());
     await rm(dir, { recursive: true, force: true });
@@ -708,9 +891,10 @@ test('启动迁移：已有旧 persona.md → 自动转成 <dir>/agent.md 并被
     const route = ctx.state.routes[0];
     const res = makeRes();
     await route.handler(makeReq('GET', '/my-memory/api/personas'), res);
-    assert.equal(res.payload.items.length, 1);
+    assert.equal(res.payload.items.length, 2, '虚拟卡「空白」+ 迁移出来的那一张');
     assert.equal(res.payload.activeId, 'baby');
-    assert.equal(res.payload.items[0].path, join(dir, 'baby', 'agent.md'));
+    assert.equal(res.payload.items[0].id, '__none__');
+    assert.equal(res.payload.items[1].path, join(dir, 'baby', 'agent.md'));
   } finally {
     ctx.state.effects.forEach((d) => typeof d === 'function' && d());
     await rm(dir, { recursive: true, force: true });
@@ -757,12 +941,17 @@ test('HTTP · 会话级角色绑定：首绑 / 换卡成功 / 同卡幂等 / 未
     await api('POST', '/personas/cat/default');
     assert.ok(first);
 
-    // 未绑定时：locked 必须是 false（新建会话页还能随便挑）
+    // 未绑定时不再是 null：回落到全局默认卡（此时 active 已被设成 cat），并标记 inherited=true；
+    // locked 仍然必须是 false（新建会话页还能随便挑）
     const before = await api('GET', '/session/persona?session=sess-1');
     assert.equal(before.status, 200);
     assert.deepEqual(
-      { personaId: before.body.personaId, locked: before.body.locked },
-      { personaId: null, locked: false },
+      {
+        personaId: before.body.personaId,
+        inherited: before.body.inherited,
+        locked: before.body.locked,
+      },
+      { personaId: 'cat', inherited: true, locked: false },
     );
 
     // 首绑
@@ -778,6 +967,8 @@ test('HTTP · 会话级角色绑定：首绑 / 换卡成功 / 同卡幂等 / 未
     const readBack = await api('GET', '/session/persona?session=sess-1');
     assert.equal(readBack.body.personaId, 'cat');
     assert.equal(readBack.body.locked, false);
+    // 这次是会话绑定，不是回落的默认卡
+    assert.equal(readBack.body.inherited, false);
 
     // 同卡再绑 → 200 幂等
     const again = await api('POST', '/session/persona', { session: 'sess-1', personaId: 'cat' });
@@ -916,8 +1107,9 @@ test('HTTP · settings：切到新目录后新角色落到新目录，指针文�
 
     // 新根自动初始化（建了默认卡），旧根的卡不会出现在列表里
     const list = await api('GET', '/personas');
-    assert.equal(list.body.items.length, 1);
-    assert.equal(list.body.items[0].path.startsWith(next), true);
+    const realItems = list.body.items.filter((i) => !i.virtual);
+    assert.equal(realItems.length, 1);
+    assert.equal(realItems[0].path.startsWith(next), true);
 
     // 新建角色落在新目录
     const created = await api('POST', '/personas', { dir: 'cat' });
@@ -1129,8 +1321,8 @@ test('启动迁移：~/.dsh/my-memory → ~/.dsh/dsh-my-memory（含指针改写
       const route = ctx.state.routes[0];
       const res = makeRes();
       await route.handler(makeReq('GET', '/my-memory/api/personas'), res);
-      assert.equal(res.payload.items.length, 1);
-      assert.equal(res.payload.items[0].id, 'baby');
+      assert.equal(res.payload.items.length, 2, '虚拟卡「空白」+ 新建的 baby');
+      assert.equal(res.payload.items[1].id, 'baby');
     } finally {
       ctx.state.effects.forEach((d) => typeof d === 'function' && d());
     }

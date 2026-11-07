@@ -95,7 +95,7 @@ export function MemoryPanel({ close, pick } = {}) {
     const res = await fetchPersonas();
     setList(res);
     setSelectedId((prev) =>
-      prev && res.items.some((i) => i.id === prev) ? prev : (res.activeId ?? res.items[0]?.id ?? null),
+      prev && res.items.some((i) => i.id === prev) ? prev : (res.activeId ?? res.items.find((i) => !i.virtual)?.id ?? null),
     );
     return res;
   }, []);
@@ -107,7 +107,7 @@ export function MemoryPanel({ close, pick } = {}) {
         const res = await fetchPersonas();
         if (!alive) return;
         setList(res);
-        setSelectedId(res.activeId ?? res.items[0]?.id ?? null);
+        setSelectedId(res.activeId ?? res.items.find((i) => !i.virtual)?.id ?? null);
         // 副标题里的条数：单独一路，失败只让这一段不显示，不影响面板
         fetchMemory({ scope: 'global' })
           .then((m) => {
@@ -211,12 +211,17 @@ export function MemoryPanel({ close, pick } = {}) {
     });
   }
 
-  /** 右键菜单四项 */
+  /**
+   * 右键菜单四项。
+   * 虚拟卡「空白」：只有「设为默认」可用（当前默认已经是它时禁用），其余三项永远禁用 ——
+   * 它没有目录可打开、没有内容可改、更不能删（删了「不使用角色卡」这个开关就没了）。
+   */
   function menuFor(persona) {
-    return [
+    const isDefault = !!list && list.activeId === persona.id;
+    const items = [
       {
         label: '设为默认',
-        disabled: !!list && list.activeId === persona.id,
+        disabled: isDefault,
         onClick: () => act(() => setDefaultPersona(persona.id)),
       },
       {
@@ -229,6 +234,10 @@ export function MemoryPanel({ close, pick } = {}) {
       { label: '更新角色目录', onClick: () => openRenameDir(persona) },
       { label: '删除角色', onClick: () => openDelete(persona) },
     ];
+    // 虚拟卡：只有「设为默认」可用（已经是默认时禁用），其余三项永远禁用
+    return persona.virtual
+      ? items.map((item, index) => ({ ...item, disabled: index === 0 ? isDefault : true }))
+      : items;
   }
 
   /** 数据目录切换后：角色卡和记忆都在新位置，重拉一遍 */
@@ -343,6 +352,8 @@ export function MemoryPanel({ close, pick } = {}) {
                         <div className="dsh-mymem-rowmain">
                           <div className="dsh-mymem-name" title={p.name || p.id}>
                             {p.name || p.id}
+                            {/* 虚拟卡「空白」标一下「不注入」：光看名字不知道它意味着什么都不加 */}
+                            {p.virtual ? <span className="dsh-mymem-badge dsh-mymem-badge-none">不注入</span> : null}
                             {list.activeId === p.id ? <span className="dsh-mymem-badge">默认</span> : null}
                           </div>
                           <div className="dsh-mymem-path" title={p.path || p.display}>
@@ -361,7 +372,7 @@ export function MemoryPanel({ close, pick } = {}) {
                 {tab === 'memory' ? (
                   // 数据目录切换后 key 变化 → 记忆页重新读一次原文
                   <GlobalMemoryPage key={`raw:${reloadTick}`} />
-                ) : selected ? (
+                ) : selected && !selected.virtual ? (
                   // key 里带 id：换卡 / 目录改名后整体重建，别把旧草稿带过来
                   <PersonaSection
                     key={`${selected.id}:${reloadTick}`}
@@ -374,6 +385,9 @@ export function MemoryPanel({ close, pick } = {}) {
                       )
                     }
                   />
+                ) : selected ? (
+                  // 「空白」虚拟卡没有任何可编辑内容：编辑区留空（不出输入框/保存按钮，也不塞文案）
+                  null
                 ) : (
                   <div className="dsh-mymem-hint">
                     {list ? '还没有角色卡，点左上角「＋ 新建」建一张' : '读取中…'}

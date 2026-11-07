@@ -133,8 +133,9 @@ test('列表：只认含 agent.md 的目录，projects/state 被排除', async (
     await writeFile(join(dir, 'projects', 'demo', AGENT_FILE), 'name: 也不该出现', 'utf8');
 
     const { items } = await store.listPersonas();
-    assert.deepEqual(items.map((i) => i.id).sort(), ['baby', 'cat']);
-    for (const item of items) {
+    // 第一项恒为虚拟卡「空白」，它没有磁盘目录，所以下面只检查真实卡的 path/display
+    assert.deepEqual(items.map((i) => i.id).sort(), ['__none__', 'baby', 'cat']);
+    for (const item of items.filter((i) => !i.virtual)) {
       assert.ok(item.path.endsWith(`agent.md`));
       assert.ok(item.display.includes('~') || item.display.endsWith('agent.md'));
     }
@@ -201,7 +202,8 @@ test('迁移 1：personas/<id>.md（一卡一文件）→ <id>/agent.md，旧目
     // 幂等
     const again = await store.migratePersona();
     assert.equal(again.migrated, false);
-    assert.equal((await store.listPersonas()).items.length, 1);
+    // 真实卡只有一张（另有恒在的虚拟卡「空白」）
+    assert.deepEqual((await store.listPersonas()).items.filter((i) => !i.virtual).map((i) => i.id), ['baby']);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -219,9 +221,11 @@ test('迁移 2：更早的单文件 persona.md → baby/agent.md，旧文件保�
     assert.equal(res.created, false);
     assert.equal(res.id, 'baby');
     const card = await store.listPersonas();
-    assert.equal(card.items.length, 1);
-    assert.equal(card.items[0].name, '大肥鱼');
-    assert.equal(card.items[0].created, 1762000000000);
+    // items[0] 是虚拟卡「空白」，迁移出来的真实卡排在它后面
+    assert.equal(card.items[0].id, '__none__');
+    assert.equal(card.items.length, 2);
+    assert.equal(card.items[1].name, '大肥鱼');
+    assert.equal(card.items[1].created, 1762000000000);
     // 旧文件还在
     assert.ok((await readFile(join(dir, 'persona.md'), 'utf8')).includes('别凶我'));
     // 注入路径同步可读
@@ -244,7 +248,7 @@ test('迁移 3：已经有 <dir>/agent.md 时什么都不做（不会被旧文�
     const res = await store.migratePersona();
     const ids = (await store.listPersonas()).items.map((i) => i.id).sort();
     // 旧单文件不会复活（已有目录卡），但 personas/ 里的 md 会被搬成目录（那是最近的布局）
-    assert.deepEqual(ids, ['cat', 'dog']);
+    assert.deepEqual(ids, ['__none__', 'cat', 'dog']);
     assert.equal(res.fromLegacySingle, false);
     // 已存在的 cat 内容没被覆盖
     assert.equal((await store.listPersonas()).items.find((i) => i.id === 'cat').name, '现有的猫');
@@ -360,7 +364,7 @@ test('重命名：同名幂等、重名 400、非法名 400、源不存在 404',
     await assert.rejects(store.renamePersona('ghost', 'x'), (err) => err.status === 404);
 
     // 失败之后目录结构没被破坏
-    assert.deepEqual((await store.listPersonas()).items.map((i) => i.id).sort(), ['baby', 'cat']);
+    assert.deepEqual((await store.listPersonas()).items.map((i) => i.id).sort(), ['__none__', 'baby', 'cat']);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -375,7 +379,7 @@ test('重命名：非 active 那张不影响 activeId', async () => {
     await store.renamePersona('baby', 'fish');
     const index = JSON.parse(await readFile(join(dir, 'state', 'personas.json'), 'utf8'));
     assert.equal(index.activeId, 'cat');
-    assert.deepEqual((await store.listPersonas()).items.map((i) => i.id).sort(), ['cat', 'fish']);
+    assert.deepEqual((await store.listPersonas()).items.map((i) => i.id).sort(), ['__none__', 'cat', 'fish']);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -391,7 +395,7 @@ test('新建校验：非法目录名 400 文案、重名拒绝、state/projects 
     await assert.rejects(store.createPersona({ dir: 'baby' }), /这个目录已经有了/);
     // 大小写不同在 Windows 上是同一个目录，这里不额外特殊处理，但要确认不会崩
     const ids = (await store.listPersonas()).items.map((i) => i.id);
-    assert.deepEqual(ids, ['baby']);
+    assert.deepEqual(ids, ['__none__', 'baby']);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -407,7 +411,7 @@ test('兼容层：readPersona / savePersona 等价于 active 那张卡', async (
     const saved = await store.savePersona({ body: '我是宝贝。' });
     assert.equal(saved.name, '大肥鱼');
     assert.equal(saved.body, '我是宝贝。');
-    assert.equal((await store.listPersonas()).items.length, 1);
+    assert.equal((await store.listPersonas()).items.filter((i) => !i.virtual).length, 1);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

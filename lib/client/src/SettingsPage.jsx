@@ -1,8 +1,10 @@
 /**
  * SettingsPage.jsx —— 面板「全局设置」页
  *
- * 目前只有一件事：数据目录。为什么先做它：角色卡、记忆全落在这个目录里，
+ * 两件事：全局提示词（数据根下 AGENT.md）和数据目录。
+ * 数据目录先做的原因：角色卡、记忆全落在这个目录里，
  * 用户搬盘或换机器时，唯一需要说清楚「东西在哪」的就是这一行路径。
+ * 全局提示词单独一节：它对所有角色生效，所以不放在角色卡编辑页里。
  *
  * 两条改目录的路径：
  *   1. 有 `pick`（外壳的 ctx.remote.directoryPicker.pick）→ 弹系统文件夹选择框，
@@ -13,7 +15,13 @@
  * 不写清楚他会去 D:\abc 里找一个不存在的 MEMORY.md。
  */
 import * as React from 'react';
-import { fetchSettings, changeDataDir, revealDataDir } from './api.js';
+import {
+  fetchSettings,
+  changeDataDir,
+  revealDataDir,
+  fetchGlobalPrompt,
+  saveGlobalPrompt,
+} from './api.js';
 import { PromptDialog } from './Dialog.jsx';
 
 /** 把绝对路径缩成 ~\... 这种短形式（面板里空间小） */
@@ -35,6 +43,14 @@ export function SettingsPage({ onChanged, pick } = {}) {
   const [dialogOpen, setDialogOpen] = React.useState(false);
   const [picking, setPicking] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
+  /** 全局提示词：受控 textarea 的值 + 保存按钮的忙碌态 */
+  const [prompt, setPrompt] = React.useState('');
+  const [promptPath, setPromptPath] = React.useState('');
+  const [promptDefault, setPromptDefault] = React.useState('');
+  const [promptLoaded, setPromptLoaded] = React.useState(false);
+  const [promptBusy, setPromptBusy] = React.useState(false);
+  /** 提示词一节自己的报错：和数据目录共用 err 的话，搬到下方后报错会显示到上一节末尾 */
+  const [promptErr, setPromptErr] = React.useState('');
   const noticeTimer = React.useRef(null);
 
   React.useEffect(
@@ -48,15 +64,32 @@ export function SettingsPage({ onChanged, pick } = {}) {
     try {
       const res = await fetchSettings();
       setData(res);
+      // 宿主顺手报出提示词文件路径，省一次请求；拿不到也没关系，下面 loadPrompt 会补
+      if (res?.promptPath) setPromptPath(String(res.promptPath));
       setErr('');
     } catch (e) {
       setErr(`读取设置失败：${e?.message || e}`);
     }
   }, []);
 
+  const loadPrompt = React.useCallback(async () => {
+    try {
+      const res = await fetchGlobalPrompt();
+      // 文件末尾通常带一个换行（编辑器友好），装进 textarea 时去掉尾部空白，
+      // 免得用户看到多余空行、保存时又把它原样写回去
+      setPrompt(String(res.text ?? '').replace(/\s+$/, ''));
+      setPromptDefault(res.defaultText);
+      if (res.path) setPromptPath(res.path);
+      setPromptLoaded(true);
+    } catch (e) {
+      setPromptErr(`读取全局提示词失败：${e?.message || e}`);
+    }
+  }, []);
+
   React.useEffect(() => {
     void load();
-  }, [load]);
+    void loadPrompt();
+  }, [load, loadPrompt]);
 
   function flash(text) {
     setNotice(text);
@@ -107,6 +140,23 @@ export function SettingsPage({ onChanged, pick } = {}) {
       setErr(`选择目录失败：${e?.message || e}`);
     } finally {
       setPicking(false);
+    }
+  }
+
+  /** 保存全局提示词：整份写回 AGENT.md，宿主写完会立刻重挂注入段 */
+  async function onSavePrompt() {
+    setPromptBusy(true);
+    setPromptErr('');
+    try {
+      const res = await saveGlobalPrompt(prompt);
+      // 文件末尾通常带一个换行（编辑器友好），装进 textarea 时去掉尾部空白，
+      // 免得用户看到多余空行、保存时又把它原样写回去
+      setPrompt(String(res.text ?? '').replace(/\s+$/, ''));
+      flash('全局提示词已保存，下一轮对话生效');
+    } catch (e) {
+      setPromptErr(`保存全局提示词失败：${e?.message || e}`);
+    } finally {
+      setPromptBusy(false);
     }
   }
 
@@ -165,6 +215,45 @@ export function SettingsPage({ onChanged, pick } = {}) {
       ) : null}
 
       {err ? <div className="dsh-mymem-error">{err}</div> : null}
+
+      <div className="dsh-mymem-settings-title">全局提示词</div>
+      <div className="dsh-mymem-hint">
+        {'对所有角色生效。插件把它存成数据根下的 '}
+        <code>AGENT.md</code>
+        {'，你也可以直接改这个文件，下一轮对话生效；留空 = 不注入这段要求。'}
+      </div>
+      <textarea
+        className="dsh-mymem-textarea dsh-mymem-settings-textarea"
+        value={prompt}
+        disabled={!promptLoaded || promptBusy}
+        spellCheck={false}
+        placeholder={promptLoaded ? '留空 = 不注入这段要求' : '读取中…'}
+        onChange={(e) => setPrompt(e.target.value)}
+      />
+      <div className="dsh-mymem-settings-row">
+        <button
+          className="dsh-mymem-btn"
+          type="button"
+          disabled={!promptLoaded || promptBusy}
+          onClick={() => void onSavePrompt()}
+        >
+          {promptBusy ? '保存中…' : '保存'}
+        </button>
+        <button
+          className="dsh-mymem-btn dsh-mymem-btn--ghost"
+          type="button"
+          disabled={!promptLoaded || promptBusy}
+          onClick={() => setPrompt(promptDefault)}
+        >
+          恢复默认
+        </button>
+        {promptPath ? (
+          <span className="dsh-mymem-hint" title={promptPath}>
+            {shortPath(promptPath)}
+          </span>
+        ) : null}
+      </div>
+      {promptErr ? <div className="dsh-mymem-error">{promptErr}</div> : null}
 
       {dialogOpen ? (
         <PromptDialog

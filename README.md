@@ -53,19 +53,20 @@ profile 侧只要让 `@local/dsh-my-memory` 作为一个 bundle 被加载即可�
 
 - 面板 API：`GET http://127.0.0.1:<端口>/my-memory/api/status`
 - 命令：`/memory` 应当输出「全局记忆 N 条 / 项目记忆 M 条 / 数据目录」
-- 工具：模型侧应能看到 `memory_remember / memory_recall / memory_forget / memory_list`
+- 工具：已下线（本版不再向模型注册 `memory_*` 工具，记/查/删改由 `/remember` 命令、系统提示注入与面板 API 提供）
 
 ### 1.4 和 dsh-soul-md 的关系（重要）
 
 `soul-md` 也提供角色卡（`soul:persona` 段）和长期记忆（`memory_*` 工具）。两者同时启用会出现
-**两段角色设定 + 两套记忆工具**，上下文里互相矛盾。二选一：
+**两段角色设定**，上下文里互相矛盾。二选一：
 
-- 用本插件：在 profile 的 `cordis.patch.yml` 里给 `- id: soul-md` 加一行 `disabled: true`
-  （它下面的 config 留着，想回去改回 `false` 即可）
-- 只用 soul-md 的记忆、保留它的人格：把本插件的 `personaBudget` 设成 `0`，角色卡段就不注入了
+- 用本插件（角色卡 + 记忆注入 + 面板）：在 profile 的 `cordis.patch.yml` 里给 `- id: soul-md` 加一行
+  `disabled: true`（它下面的 config 留着，想回去改回 `false` 即可）
+- 想同时用 soul-md 的 `memory_*` 工具：不必 disable，只把本插件的 `personaBudget` 设成 `0`，
+  角色卡段就不注入了
 
-工具名本身不冲突（本插件是 `memory_remember / recall / forget / list`，
-soul-md 是 `memory_append / read / search / rewrite`），但语义重叠会让模型两边都写，所以还是建议二选一。
+工具名冲突已经不存在：本版不再向模型注册 `memory_*` 工具，
+所以不会和 soul-md 的 `memory_append / read / search / rewrite` 抢名字。
 
 ---
 
@@ -75,7 +76,7 @@ soul-md 是 `memory_append / read / search / rewrite`），但语义重叠会让
 
 | 字段 | 默认 | 说明 |
 | --- | --- | --- |
-| `enabled` | `true` | 总开关；`false` 时不注册任何段/工具/命令/路由 |
+| `enabled` | `true` | 总开关；`false` 时不注册任何段/命令/路由 |
 | `dataDir` | `''` | 空 = `~/.dsh/my-memory/`；可指向任意目录 |
 | `personaOrder` | `1.1` | 角色卡段序 |
 | `order` | `1.2` | 记忆段序（全局 + 项目索引） |
@@ -84,7 +85,7 @@ soul-md 是 `memory_append / read / search / rewrite`），但语义重叠会让
 | `projectBudget` | `800` | 项目索引注入上限（字，保留头尾）；`0` = 不限 |
 | `apiPrefix` | `/my-memory/api` | 面板 HTTP 前缀 |
 | `personaName` | `助手` | 没设置过角色卡时的默认名字（正文默认 `我是 助手。`） |
-| `recallLimit` | `8` | `memory_recall` 不传 limit 时的条数 |
+| `recallLimit` | `8` | 检索默认条数（本版没有检索工具了，字段保留兼容） |
 | `rootPointerFile` | 空 | 数据根指针文件路径；空 = `~/.dsh/my-memory.roots.json`（单测用它指到临时目录） |
 
 预算裁剪只做一件事：超出上限时**保留头尾**并在中间插入 `…（中段省略）…`。
@@ -102,6 +103,7 @@ soul-md 是 `memory_append / read / search / rewrite`），但语义重叠会让
   state/sessions.json            会话 → 角色卡的绑定（随时可改）
   state/projects.json            哪些目录开着「局部记忆」的开关
   MEMORY.md                      全局记忆（单文件，只装通用/人相关内容）
+  AGENT.md                       全局提示词（所有角色通用的对话要求，面板可直接改）
   projects/<slug>/…              **旧版**项目记忆（保留不删、不自动迁移，见下）
   persona.md                     更早版本的单卡文件（迁移后保留不删）
   personas/                      上一版「一卡一 md」目录（迁移后只删空目录）
@@ -146,6 +148,24 @@ updated: 1762146000000
 
 `activeId` 失效（目录被手删、json 被改坏）时回落到「排序第一张」（created 最早的那张），
 读列表时顺手把自愈结果写回磁盘；注入路径（同步）只算不写。
+
+### 空白角色卡（不使用角色）
+
+角色列表最上面永远有一张虚拟卡 **「空白」**（id `__none__`，`virtual: true`），语义是
+**「不使用角色卡」**：
+
+- 选中它（设为全局默认，或绑定给某个会话）时，本插件**一条提示词都不注入** ——
+  角色卡段（`# 角色设定`）、全局对话要求（数据根 `AGENT.md`）、记忆段（`my-memory:context`）
+  三段全部为空。系统提示词里不会出现本插件的任何内容。
+- 它**不对应磁盘目录**：没有 `<dir>/agent.md`、没有 `path`，所以不能编辑 / 改名 / 打开目录 /
+  重载 / 删除（这些接口对 `__none__` 一律 4xx，带中文原因）；面板里右键菜单项全部禁用，
+  点它时右侧编辑区是空的。
+- 会话绑定优先于全局默认，跟真实卡完全一致：某个会话绑了「空白」，别的会话（跟着默认卡走）
+  照常注入；把默认卡切回真实卡，绑了「空白」的会话仍然不注入。
+- 插件其它功能（记忆面板、HTTP API、`/memory` `/remember` `/persona` 命令）完全不受影响。
+
+这是「我想彻底关掉这个插件的提示词」的开关 —— 比把预算设成 0 更彻底（那样只关角色卡段，
+记忆段还会注入）。
 
 ### MEMORY.md（全局）
 
@@ -192,19 +212,30 @@ updated: 1762146000000
 | `my-memory:persona` | `personaOrder`（1.1） | **当前会话绑定的卡**（没绑定才用 activeId；绑定随时可改），超预算截断加 `…` |
 | `my-memory:context` | `order`（1.2） | 全局记忆全文（头尾裁剪）+ 当前目录的局部记忆（头尾裁剪；开关关着就不注入） |
 
-角色卡段形如：
+角色卡段形如（第二块来自数据根下的 `AGENT.md`，**所有角色通用**）：
 
 ```
 # 角色设定
 
 你现在扮演这个角色（角色卡「大肥鱼」）：
 <角色卡正文>
+
+# 全局对话要求
+
+<AGENT.md 的正文>
 ```
 
-`text` 传的是**函数**，`dsh-system-prompt` 每次组装都会求值 —— 改文件下一轮就生效。
-读文件带 mtime+size 缓存，内容和上次一致时直接返回上一次拼好的同一个字符串，
+全局提示词**不受 `personaBudget` 截断**（预算只管卡正文，否则长卡会把提示词挤掉）：
+文件缺失时用内置默认值（注入段不至于突然空掉）；文件内容只剩空白 = 用户明确清空，整节省略。
+默认值：`像真人一样自然聊天，使用第一人称直接交流，禁止旁白表达，通过自然语言流露情绪，禁止说自己是 AI`。
+它是数据根下的普通 Markdown 文件，编辑器直接改也生效（每轮同步读，带 mtime+size 缓存）。
+
+`text` 传的是**函数**，`dsh-system-prompt` 每次组装都会求值 —— 改文件下一轮就生效。读文件带 mtime+size 缓存，内容和上次一致时直接返回上一次拼好的同一个字符串，
 保证注入字节稳定（否则每轮改写系统提示前缀会让 KV 缓存全废）。
-写入路径（工具/命令/HTTP）在成功后仍会 dispose + 重注册一次段，两条路都通。
+写入路径（命令/HTTP）在成功后仍会 dispose + 重注册一次段，两条路都通。
+
+生效卡是虚拟卡「空白」（`__none__`）时，**两段都返回空串**（连 `AGENT.md` 也不拼进去），
+详见 [空白角色卡](#空白角色卡不使用角色)。
 
 **为什么必须 `interpolate: false`**：角色卡与记忆正文里的 `{}` 会被当提示词变量插值，
 未知变量会让整段组装失败。段里也绝不加 `complete: true`。
@@ -212,18 +243,44 @@ updated: 1762146000000
 当前项目从 `workingDirectory` 服务拿 cwd（`get(session)`），拿不到就退回
 `session.header.cwd`，再退回 `defaultDirectory`；全都拿不到时只注入全局部分，不报错。
 
+### 4.1 让某个预设「只留本插件的注入」（`./preset-solo`）
+
+默认模式下上面两段是和官方提示段（`harness:identity`、`deployment:persona-prefix`、
+`ui:deliverable-file-references`、`harness:source`、`app:web-surface`）拼在一起的。
+如果某个 agent 预设（例如纯聊天的「聊天模式」）希望系统提示词**只剩**本插件注入的内容，
+在那个预设的 `plugins` 里挂一条本包的子路径导出即可：
+
+```yaml
+- id: preset-chat
+  name: '@deepseek-ai/dsh-agent-preset'
+  config:
+    id: chat
+    plugins:
+      - id: chat-solo-prompt
+        name: '@local/dsh-my-memory/preset-solo'
+```
+
+它只在这个预设的 agent 作用域里做三件事（机制全部来自 `dsh-system-prompt` 的 `assemble()`）：
+
+| 做什么 | 为什么 |
+| --- | --- |
+| 注册**唯一**一个 `complete: true` 段，正文 = 角色卡段 + 记忆段（空段跳过） | `assemble()` 末尾把 `sections` 换成 `[completeSection]`，所有官方英文段被丢弃。同一作用域**只能有一个** complete 段，多一个直接组装失败 |
+| `suppressRuntimeContext()` | 去掉可选的 runtime-context 贡献（沙箱策略/审批策略/harness 源/Web 界面），那条 `Current runtime context…` 的 user 消息就不再产生 |
+| 用同名 `context` 把 `working-directory:current` 影子覆盖成空文本 | 它是 `required: true`，抑制器拦不住，而且 `refreshContext()` 会「补回 required」。同名覆盖后它既不在 required 集合里、文本也空，最终快照里一条 context 都没有 |
+
+两段的拼装函数通过服务 `myMemoryPrompt`（`{ personaText, contextText }`）从根层实例取，
+预设内插件不重复 new store（那会重复跑启动迁移、写出第二份状态文件）。服务缺失
+（`enabled: false`）时预设内段降级为空，不会让预设挂起。
+
+这些都是**作用域级**的注册，标准模式等其它预设零影响。注意：预设声明只在**新建会话**时生效。
+
 ---
 
-## 5. 工具
+## 5. 工具（已下线）
 
-名字刻意与 `dsh-soul-md` 错开（它已占用 `memory_append/read/search/rewrite` 与 `soul_*`）。
-
-| 工具 | 作用 |
-| --- | --- |
-| `memory_remember({ text, scope?, title?, tags? })` | 新增一条。`scope`：`auto`（默认）/ `global` / `project`。返回 `{ id, scope, path }` |
-| `memory_recall({ query?, scope?, limit? })` | 关键词检索（中文 bigram + 子串，无外部依赖）；不传 `query` 返回最近 N 条 |
-| `memory_forget({ id })` | 按 id 删除；`g_` 删全局那一行，`p_` 删文件 + 索引行；找不到明确报错 |
-| `memory_list({ scope? })` | 列出 id + 摘要 + 日期（`all` / `global` / `project`） |
+已下线：本版不再向模型注册 `memory_*` 工具。记、查、删分别改由 `/remember` 命令、
+系统提示注入（全局记忆全文 + 项目记忆索引）和客户端面板的 HTTP API 提供。
+历史版本曾注册 `memory_remember / memory_recall / memory_forget / memory_list`，现已整节移除。
 
 ### `scope=auto` 的判定（刻意简单、可解释）
 
@@ -232,12 +289,12 @@ updated: 1762146000000
    （报错/配置/参数/依赖/版本/命令/路径/端口/插件/api/git/npm…）
 
 两条都满足 → 项目记忆；否则 → 全局记忆。误判后果很轻（项目记忆也只是本仓库可见，随时能删）。
-**语义约束**（也写在工具 description 里）：全局记忆只装「人相关、通用、与具体技术无关」的内容
+**语义约束**（也写在 /remember 命令说明与面板提示里）：全局记忆只装「人相关、通用、与具体技术无关」的内容
 （称呼、口味、作息、脾气、偏好），技术细节必须进项目记忆，否则会挤爆每轮都注入的全局记忆。
 
 ### 命令
 
-- `/remember <内容>` —— 等价 `memory_remember`（auto scope）
+- `/remember <内容>` —— 把这句话记成记忆（auto scope）
 - `/memory` —— 一行状态：全局几条、当前项目几条、数据目录
 - `/persona <名字或 id>` —— 切换默认角色卡；不带参数列出所有卡（当前那张前面带 `*`）
 
@@ -259,11 +316,13 @@ updated: 1762146000000
 | POST | `/personas/:id/rename` | 重命名磁盘上的角色目录 `{ dir }` → 卡对象（`id`/`display` 已是新目录）；整个目录一起搬（头像等一并跟着走）；同名幂等、重名 400「这个目录已经有了」、非法名 400、源不存在 404，active 时 activeId 跟着改 |
 | GET | `/persona` | 兼容旧面板：等价「返回 active 那张卡」`{ name, body, updated }` |
 | PUT | `/persona` | 兼容旧面板：等价「保存 active 那张卡」 |
-| GET | `/session/persona?session=<id>` | `{ sessionId, personaId, name, locked }`；没绑过 → `personaId:null`；**`locked` 恒为 false**（字段留着做客户端兼容，随时都能改绑） |
-| POST | `/session/persona` | 绑定/改绑 `{ session, personaId }`，**永远 200**（没有「锁定」这套逻辑）；换卡会更新 `boundAt`，同卡幂等；未知卡 404 |
+| GET | `/session/persona?session=<id>` | `{ sessionId, personaId, name, locked, inherited }`；没绑过（或绑的目录已被删）→ 回落**全局默认角色卡**并带 `inherited:true`，一张卡都没有才 `personaId:null`；**`locked` 恒为 false**（字段留着做客户端兼容，随时都能改绑） |
+| POST | `/session/persona` | 绑定/改绑 `{ session, personaId }`，**永远 200**（没有「锁定」这套逻辑），返回里带 `inherited:false`；换卡会更新 `boundAt`，同卡幂等；未知卡 404 |
 | GET | `/project/state?cwd=<绝对路径>` | `{ cwd, memoryPath, exists, enabled, hasLegacy }` |
 | POST | `/project/state` | 开关 `{ cwd, enabled }`；打开顺手建文件，关闭**只写状态、不删不改** |
-| GET | `/settings` | `{ dataDir, defaultDataDir, folderName }`（`folderName` = `dsh-my-memory`，客户端显示用） |
+| GET | `/settings` | `{ dataDir, defaultDataDir, folderName, promptPath }`（`folderName` = `dsh-my-memory`，`promptPath` = `<数据根>/AGENT.md`） |
+| GET | `/settings/prompt` | `{ path, text, defaultText, exists }`：全局提示词（`<数据根>/AGENT.md`）正文；文件缺失时 `text` 给默认值、`exists:false` |
+| PUT/POST | `/settings/prompt` | 整份写回 `{ text }`（字符串，≤ 4000 字，空串 = 不注入这段）→ `{ ok:true, path, text }`；写完立刻重挂注入段 |
 | GET | `/settings/picker` | `{ supported }`：宿主有没有系统文件夹选择能力（只探测，不弹框） |
 | POST | `/settings/dataDir` | 切换数据根 `{ parent }`（或兼容的 `{ path }`）→ `{ ok:true, dataDir, movedFrom }`；父目录会自动补一层 `dsh-my-memory`（已带则不重复拼）；空值 = 回默认根；不迁数据 |
 | POST | `/settings/reveal` | 用文件管理器打开当前数据目录 → `{ ok:true, path }` |
@@ -292,20 +351,21 @@ handler 直接吃 `(req, res)`（pathname 的 prefix 部分在 handler 里自己
 ## 7. 开发
 
 ```bash
-node --test test/        # 94 个用例：store / personas（目录+迁移+数据根）/ project / 插件接线
+node --test test/        # 96 个用例：store / personas（目录+迁移+数据根）/ project / 插件接线
 ```
 
-- `lib/host/index.js` —— 插件入口：Config、注入、段、工具、命令、HTTP
+- `lib/host/index.js` —— 插件入口：Config、注入、段、命令、HTTP
 - `lib/host/store.js` —— 存储层：角色卡、全局记忆、项目记忆、索引重建、关键词相关度
 - `lib/host/project.js` —— git 仓库识别（向上找 `.git`，目录或 worktree 的指针文件都算）与 slug
 - `lib/host/atomic.js` —— 原子写（tmp + rename + Windows EPERM 重试 + 按路径排队）+ 同步 mtime 缓存
 
 ### 两个容易踩的坑（都写进代码注释了）
 
-1. **`parameters` 必须自己写成真正的 JSON Schema**。DSH 的
+1. **（工具已下线，此条留作记录）`parameters` 必须自己写成真正的 JSON Schema**。DSH 的
    `parameters: { text: { type, required, description } }` 是 `defineTool` 的 author DSL，
-   只有 `defineTool` 会把它编译成 JSON Schema。本插件为零依赖直接 `ctx.tools.register(原对象)`，
-   所以参数声明必须是 `{ type: 'object', properties: {...}, required: [...] }`。
+   只有 `defineTool` 会把它编译成 JSON Schema。旧版为零依赖直接 `ctx.tools.register(原对象)`，
+   所以参数声明得写成 `{ type: 'object', properties: {...}, required: [...] }`；
    同理 `output.schema` 只能使用 DSH 的 JSON Schema 子集
    （`type / properties / required / additionalProperties / items / enum / const`）。
+   本版不再注册工具，留这条只为将来真要加工具时别再踩同一个坑。
 2. **段文本必须 `interpolate: false`**，且不能出现第二个 `complete: true`。
