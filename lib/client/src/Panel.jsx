@@ -21,6 +21,7 @@ import { GlobalMemoryPage } from './GlobalMemoryPage.jsx';
 import { SettingsPage } from './SettingsPage.jsx';
 import { ContextMenu, menuAt } from './ContextMenu.jsx';
 import { PromptDialog, ConfirmDialog } from './Dialog.jsx';
+import { fetchMemory } from './api.js';
 import {
   fetchPersonas,
   createPersona,
@@ -64,6 +65,8 @@ export function MemoryPanel({ close } = {}) {
   const [err, setErr] = React.useState('');
   const [notice, setNotice] = React.useState('');
   const [menu, setMenu] = React.useState(null);
+  /** 全局记忆条数：标题区副标题「N 条长期记忆」用；拿不到就不显示这一段 */
+  const [globalCount, setGlobalCount] = React.useState(null);
   const [dialog, setDialog] = React.useState(null);
   /** 每次「更新角色目录」或数据目录切换 +1，用来强制重建右侧编辑页与记忆页 */
   const [reloadTick, setReloadTick] = React.useState(0);
@@ -104,6 +107,12 @@ export function MemoryPanel({ close } = {}) {
         if (!alive) return;
         setList(res);
         setSelectedId(res.activeId ?? res.items[0]?.id ?? null);
+        // 副标题里的条数：单独一路，失败只让这一段不显示，不影响面板
+        fetchMemory({ scope: 'global' })
+          .then((m) => {
+            if (alive) setGlobalCount(m.items.length);
+          })
+          .catch(() => {});
       } catch (e) {
         if (alive) setErr(`读取角色卡失败：${e?.message || e}`);
       }
@@ -228,23 +237,24 @@ export function MemoryPanel({ close } = {}) {
 
   const selected = list?.items.find((i) => i.id === selectedId) || null;
 
+  /**
+   * 副标题：`N 条长期记忆 · 当前角色 <名字>`。
+   * 两块数据都是异步的，缺哪块就省哪块 —— 宁可短一点，也不要显示「undefined 条」。
+   */
+  const activePersona = list?.items.find((i) => i.id === list.activeId) || selected;
+  const subtitle = [
+    globalCount === null ? '' : `${globalCount} 条长期记忆`,
+    activePersona ? `当前角色 ${activePersona.name || activePersona.id}` : '',
+  ]
+    .filter(Boolean)
+    .join(' · ');
+
   return (
     <div className="dsh-mymem-root dsh-mymem-panel" data-dsh-plugin="my-memory" data-dsh-part="panel">
-      {/* 顶层大 tab：管大块（角色卡 / 全局设置） */}
-      <div className="dsh-mymem-toptabs" role="tablist" aria-label="面板分区">
-        {TOP_TABS.map((t) => (
-          <button
-            key={t.key}
-            className="dsh-mymem-toptab"
-            type="button"
-            role="tab"
-            aria-selected={topTab === t.key}
-            data-active={topTab === t.key ? '1' : '0'}
-            onClick={() => setTopTab(t.key)}
-          >
-            {t.label}
-          </button>
-        ))}
+      {/* 标题区：标题固定「记忆」，副标题是真实数据（原插件同款） */}
+      <div className="dsh-mymem-head">
+        <div className="dsh-mymem-title">记忆</div>
+        <div className="dsh-mymem-sub">{subtitle}</div>
         <span className="dsh-mymem-tabs-spacer" />
         {typeof close === 'function' ? (
           <button
@@ -259,35 +269,55 @@ export function MemoryPanel({ close } = {}) {
         ) : null}
       </div>
 
+      {/* 顶层 tab：管大块（角色卡 / 全局设置） */}
+      <div className="dsh-mymem-toptabs" role="tablist" aria-label="面板分区">
+        {TOP_TABS.map((t) => (
+          <button
+            key={t.key}
+            className="dsh-mymem-toptab"
+            type="button"
+            role="tab"
+            aria-selected={topTab === t.key}
+            data-active={topTab === t.key ? '1' : '0'}
+            onClick={() => setTopTab(t.key)}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
       {topTab === 'settings' ? (
         <SettingsPage onChanged={onDataDirChanged} />
       ) : (
         <>
-          {/* 工具行：左边新建、右边内页 tab（连成一排、选中带下划线） */}
-          <div className="dsh-mymem-tabs" role="tablist" aria-label="角色卡分页">
-            <div className="dsh-mymem-tabs-actions">
+          <div className="dsh-mymem-body">
+          {/* 工具行：左边新建、右边内页分段（一个圆角容器装着两段） */}
+          <div className="dsh-mymem-toolbar">
+            <div className="dsh-mymem-toolbar-left">
               <button className="dsh-mymem-btn" type="button" onClick={openCreate}>
                 ＋ 新建
               </button>
               {notice ? <span className="dsh-mymem-ok">{notice}</span> : null}
             </div>
-            <span className="dsh-mymem-tabs-spacer" />
-            {INNER_TABS.map((t) => (
-              <button
-                key={t.key}
-                className="dsh-mymem-tab"
-                type="button"
-                role="tab"
-                aria-selected={tab === t.key}
-                data-active={tab === t.key ? '1' : '0'}
-                onClick={() => setTab(t.key)}
-              >
-                {t.label}
-              </button>
-            ))}
+            <div className="dsh-mymem-toolbar-right">
+            <div className="dsh-mymem-inner-tabs" role="tablist" aria-label="角色卡分页">
+              {INNER_TABS.map((t) => (
+                <button
+                  key={t.key}
+                  className="dsh-mymem-inner-tab"
+                  type="button"
+                  role="tab"
+                  aria-selected={tab === t.key}
+                  data-active={tab === t.key ? '1' : '0'}
+                  onClick={() => setTab(t.key)}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
+            </div>
           </div>
 
-          <div className="dsh-mymem-body">
             {err ? <div className="dsh-mymem-error">{err}</div> : null}
 
             <div className="dsh-mymem-split">
