@@ -74,6 +74,42 @@ export function MemoryPanel({ close, pick } = {}) {
   /** 每次「更新角色目录」或数据目录切换 +1，用来强制重建右侧编辑页与记忆页 */
   const [reloadTick, setReloadTick] = React.useState(0);
 
+  const activeEditor = React.useRef(null);
+  const changingPage = React.useRef(false);
+  const [leaving, setLeaving] = React.useState(false);
+  const selectedIdRef = React.useRef(selectedId);
+  selectedIdRef.current = selectedId;
+
+  /** 当前页交出保存入口，卸载时只撤销自己的注册。 */
+  const registerEditor = React.useCallback((editor) => {
+    activeEditor.current = editor;
+    return () => {
+      if (activeEditor.current === editor) activeEditor.current = null;
+    };
+  }, []);
+
+  /** 切角色、切页和关闭之前先保存；失败或冲突时保留原页与草稿。 */
+  const navigate = React.useCallback(async (action) => {
+    if (changingPage.current) return false;
+    changingPage.current = true;
+    setLeaving(true);
+    setErr('');
+    try {
+      if (activeEditor.current && !(await activeEditor.current.flush())) {
+        setErr('当前内容尚未保存，请先处理编辑区的错误或冲突。');
+        return false;
+      }
+      await action();
+      return true;
+    } catch (error) {
+      setErr(String(error?.message || error));
+      return false;
+    } finally {
+      changingPage.current = false;
+      setLeaving(false);
+    }
+  }, []);
+
   const noticeTimer = React.useRef(null);
   React.useEffect(() => {
     ensureStyle();
@@ -124,13 +160,10 @@ export function MemoryPanel({ close, pick } = {}) {
    * 「删最后一张」这种宿主拒绝的 400 文案必须露出来，不许吞。
    */
   async function act(fn) {
-    setErr('');
-    try {
+    return navigate(async () => {
       await fn();
       await load();
-    } catch (e) {
-      setErr(String(e?.message || e));
-    }
+    });
   }
 
   const closeMenu = React.useCallback(() => setMenu(null), []);
@@ -227,8 +260,8 @@ export function MemoryPanel({ close, pick } = {}) {
             await revealPersona(persona.id);
           }),
       },
-      { label: '更新角色目录', onClick: () => openRenameDir(persona) },
-      { label: '删除角色', onClick: () => openDelete(persona) },
+      { label: '更新角色目录', onClick: () => void navigate(() => openRenameDir(persona)) },
+      { label: '删除角色', onClick: () => void navigate(() => openDelete(persona)) },
     ];
     // 虚拟卡：只有「设为默认」可用（已经是默认时禁用），其余三项永远禁用
     return persona.virtual
@@ -261,6 +294,7 @@ export function MemoryPanel({ close, pick } = {}) {
         alive = false;
       };
     }
+    setMemoryCount(null);
     fetchPersonaMemory(selectedId)
       .then((m) => {
         if (alive) setMemoryCount(String(m?.text ?? '').trim().length);
@@ -298,7 +332,8 @@ export function MemoryPanel({ close, pick } = {}) {
             type="button"
             title="关闭面板"
             aria-label="关闭面板"
-            onClick={() => close()}
+            disabled={leaving}
+            onClick={() => void navigate(() => close())}
           >
             ×
           </button>
@@ -315,7 +350,8 @@ export function MemoryPanel({ close, pick } = {}) {
             role="tab"
             aria-selected={topTab === t.key}
             data-active={topTab === t.key ? '1' : '0'}
-            onClick={() => setTopTab(t.key)}
+            disabled={leaving}
+            onClick={() => void navigate(() => setTopTab(t.key))}
           >
             {t.label}
           </button>
@@ -323,14 +359,14 @@ export function MemoryPanel({ close, pick } = {}) {
       </div>
 
       {topTab === 'settings' ? (
-        <SettingsPage onChanged={onDataDirChanged} pick={pick} />
+        <SettingsPage onChanged={onDataDirChanged} pick={pick} registerEditor={registerEditor} />
       ) : (
         <>
           <div className="dsh-mymem-body">
           {/* 工具行：左边新建、右边内页分段（一个圆角容器装着两段） */}
           <div className="dsh-mymem-toolbar">
             <div className="dsh-mymem-toolbar-left">
-              <button className="dsh-mymem-btn" type="button" onClick={openCreate}>
+              <button className="dsh-mymem-btn" type="button" disabled={leaving} onClick={() => void navigate(openCreate)}>
                 ＋ 新建
               </button>
               {notice ? <span className="dsh-mymem-ok">{notice}</span> : null}
@@ -345,7 +381,8 @@ export function MemoryPanel({ close, pick } = {}) {
                   role="tab"
                   aria-selected={tab === t.key}
                   data-active={tab === t.key ? '1' : '0'}
-                  onClick={() => setTab(t.key)}
+                  disabled={leaving}
+                  onClick={() => void navigate(() => setTab(t.key))}
                 >
                   {t.label}
                 </button>
@@ -365,7 +402,8 @@ export function MemoryPanel({ close, pick } = {}) {
                         key={p.id}
                         className="dsh-mymem-row"
                         data-active={p.id === selectedId ? '1' : '0'}
-                        onClick={() => setSelectedId(p.id)}
+                        aria-disabled={leaving}
+                        onClick={() => void navigate(() => setSelectedId(p.id))}
                         onContextMenu={(e) => setMenu(menuAt(e, menuFor(p)))}
                       >
                         <span className="dsh-mymem-avatar">{(p.name || p.id).slice(0, 1)}</span>
@@ -394,13 +432,17 @@ export function MemoryPanel({ close, pick } = {}) {
                   <PersonaMemoryPage
                     key={`mem:${selected?.id ?? ''}:${reloadTick}`}
                     persona={selected}
-                    onSaved={(text) => setMemoryCount(String(text ?? '').trim().length)}
+                    registerEditor={registerEditor}
+                    onSaved={(text, id) => {
+                      if (selectedIdRef.current === id) setMemoryCount(String(text ?? '').trim().length);
+                    }}
                   />
                 ) : selected && !selected.virtual ? (
                   // key 里带 id：换卡 / 目录改名后整体重建，别把旧草稿带过来
                   <PersonaSection
                     key={`${selected.id}:${reloadTick}`}
                     persona={selected}
+                    registerEditor={registerEditor}
                     onSaved={(saved) =>
                       setList((prev) =>
                         prev

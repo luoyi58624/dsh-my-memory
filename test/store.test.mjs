@@ -42,6 +42,35 @@ test('persona: 文件不存在时返回默认空卡', async () => {
   }
 });
 
+test('persona: 初始正文使用显示名，保留显式正文与已有角色', async () => {
+  const { dir, store } = await tempStore();
+  try {
+    await store.ensurePersonas({ name: '助手' });
+    const initial = await store.readActivePersona();
+    assert.equal(initial.id, 'baby');
+    assert.equal(initial.name, '助手');
+    assert.equal(initial.body, '我是 助手。');
+    assert.equal(store.readActivePersonaSync().body, '我是 助手。');
+
+    const named = await store.createPersona({ dir: 'cat', name: '小猫娘' });
+    assert.equal(named.name, '小猫娘');
+    assert.equal(named.body, '我是 小猫娘。');
+    assert.equal((await store.reloadPersona('cat')).body, named.body);
+
+    const body = '\n手写正文  \n\n';
+    const explicit = await store.createPersona({ dir: 'custom', name: '别的名字', body });
+    assert.equal(explicit.body, body);
+    const empty = await store.createPersona({ dir: 'empty', name: '空正文', body: '' });
+    assert.equal(empty.body, '');
+
+    const before = await readFile(initial.path, 'utf8');
+    await store.ensurePersonas({ name: '新的默认名称' });
+    assert.equal(await readFile(initial.path, 'utf8'), before, '重新初始化不能修改已有角色');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('persona: 序列化/解析往返（frontmatter 只有 name/updated）', () => {
   const src = serializePersona({ name: '大肥鱼', body: '我是大肥鱼。\n\n说话要简短。', updated: 1762146000000 });
   assert.ok(src.startsWith('---\nname: 大肥鱼\nupdated: 1762146000000\n---\n'));

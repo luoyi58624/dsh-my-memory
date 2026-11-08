@@ -2,7 +2,7 @@
   "name": "@local/dsh-my-memory",
   "version": "0.1.0",
   "private": true,
-  "description": "My Memory：一张角色卡 + 全局记忆（人相关）+ 项目记忆（技术细节），带 mtime 缓存的稳定注入与 Web 面板 API",
+  "description": "DSH 的全局提示词、角色设定和每角色 Markdown 长期记忆",
   "type": "module",
   "main": "lib/host/index.js",
   "exports": {
@@ -12,7 +12,9 @@
     "./package.json": "./package.json"
   },
   "scripts": {
-    "test": "node --test test/"
+    "build": "node scripts/build-client.mjs",
+    "test": "node --test test/",
+    "test:memory": "node --test test/documents.test.mjs test/document-editor.test.mjs test/prompts.test.mjs test/plugin.test.mjs test/preset-solo.test.mjs test/personas.test.mjs test/store.test.mjs test/rev.test.mjs"
   },
   "dsh": {
     "bundle": {
@@ -26,6 +28,9 @@
     "@deepseek-ai/schemastery": "*"
   },
   "dependencies": {
-    "@deepseek-ai/schemastery": "*"
+    "@deepseek-ai/schemastery": "^3.19.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
   }
 }

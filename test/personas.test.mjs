@@ -407,7 +407,7 @@ test('兼容层：readPersona / savePersona 等价于 active 那张卡', async (
     await store.createPersona({ dir: 'baby', name: '大肥鱼' });
     const read = await store.readPersona();
     assert.equal(read.name, '大肥鱼');
-    assert.equal(read.body, '我是 baby。');
+    assert.equal(read.body, '我是 大肥鱼。');
     const saved = await store.savePersona({ body: '我是宝贝。' });
     assert.equal(saved.name, '大肥鱼');
     assert.equal(saved.body, '我是宝贝。');

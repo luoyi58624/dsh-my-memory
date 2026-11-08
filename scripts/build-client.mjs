@@ -10,43 +10,14 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
+import { build } from 'esbuild';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
 const ENTRY = path.join(ROOT, 'lib', 'client', 'src', 'index.jsx');
 const OUTFILE = path.join(ROOT, 'lib', 'client', 'index.js');
 const PKG = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
-
-/** 本包不装 esbuild，按候选路径找本机已有的副本 */
-const ESBUILD_CANDIDATES = [
-  path.join(ROOT, 'node_modules', 'esbuild'),
-  'D:/project/react/vite-react-js/node_modules/.pnpm/node_modules/esbuild',
-  'D:/project/vue/my-vue-app/node_modules/.pnpm/node_modules/esbuild',
-  'D:/project/react/vite-react/node_modules/esbuild',
-  'D:/project/vue/vite/vue3-tsx-element-admin/node_modules/esbuild',
-];
-
-async function loadEsbuild() {
-  try {
-    return await import('esbuild');
-  } catch {
-    /* 继续找本机副本 */
-  }
-  for (const candidate of ESBUILD_CANDIDATES) {
-    const entry = path.join(candidate, 'lib', 'main.js');
-    if (!fs.existsSync(entry)) continue;
-    try {
-      const mod = await import(pathToFileURL(entry).href);
-      return mod.default && mod.default.build ? mod.default : mod;
-    } catch (err) {
-      console.warn('[build-client] 跳过不可用的 esbuild:', candidate, err.message);
-    }
-  }
-  throw new Error('找不到可用的 esbuild（可 npm i -D esbuild，或用 ESBUILD_CANDIDATES 里任一本机副本）');
-}
-
-const esbuild = await loadEsbuild();
 
 const banner = `window.__ModuleLoader__.load({
 	id: ${JSON.stringify(PKG.name)},
@@ -59,7 +30,7 @@ const footer = `		return module.exports;
 	}
 });`;
 
-await esbuild.build({
+await build({
   entryPoints: [ENTRY],
   outfile: OUTFILE,
   bundle: true,

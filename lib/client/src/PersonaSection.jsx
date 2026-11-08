@@ -1,125 +1,68 @@
 /**
- * PersonaSection.jsx —— 面板「角色设定」页
- *
- * 只有两个输入框：名字、角色信息（正文）。别的行一个都不要。
- * **没有保存按钮**：跟原插件一样失焦即存（onBlur）。
- * why：角色卡是「写完就走」的东西，多一个保存按钮只会多一次「我改了半天好像没生效」；
- * 另外原插件的保存按钮用品牌色实心填充 + 白字，主题里 brand 接近白时就是一个白块，
- * 这个坑不再踩。
- *
- * 数据由父组件先读好传进来（persona），保存成功后通过 onSaved 回传，
- * 这样左边那张卡的显示名能跟着变，不需要二次拉接口。
+ * 角色设定页：名字与正文分别编辑，失焦保存同一份 agent.md。
+ * 使用文件版本保护外部修改，保存回包只确认已经提交的那一份内容。
  */
 import * as React from 'react';
-import { updatePersona } from './personas.js';
+import { fetchPersonaById, updatePersona } from './personas.js';
+import { useDocumentEditor, DocumentEditorFeedback } from './DocumentEditor.jsx';
 
-/** 「已自动保存」停留时长 */
-const SAVED_FLASH_MS = 1600;
+const FIELDS = ['name', 'body'];
 
-/**
- * @param {{persona?: {name?:string, body?:string}, onSaved?: (p:{name:string,body:string,updated:number})=>void}} props
- */
-export function PersonaSection({ persona, onSaved } = {}) {
-  const [name, setName] = React.useState(String(persona?.name ?? ''));
-  const [body, setBody] = React.useState(String(persona?.body ?? ''));
-  const [saving, setSaving] = React.useState(false);
-  const [flash, setFlash] = React.useState('');
-  const [err, setErr] = React.useState('');
-
-  /** 已落盘的基线：只拿来判断「这个字段到底变了没有」，避免光标进出就写一次盘 */
-  const baseline = React.useRef({ name: String(persona?.name ?? ''), body: String(persona?.body ?? '') });
-  /** 防重入用 ref：失焦可能连着触发，state 读到的还是旧值 */
-  const savingRef = React.useRef(false);
-  const flashTimer = React.useRef(null);
-
-  React.useEffect(
-    () => () => {
-      if (flashTimer.current) clearTimeout(flashTimer.current);
-    },
-    [],
-  );
-
-  /**
-   * 失焦自动保存。
-   * @param {{name?:string, body?:string}} patch 本次要提交的字段（其余沿用当前值）
-   */
-  async function autosave(patch) {
-    if (savingRef.current) return;
-    const next = {
-      name: patch.name !== undefined ? String(patch.name) : name,
-      body: patch.body !== undefined ? String(patch.body) : body,
-    };
-    // 没变就不写：宿主保存会 refresh 注入段，每改一次 prompt 前缀都变（KV 缓存全废）
-    if (next.name === baseline.current.name && next.body === baseline.current.body) return;
-
-    savingRef.current = true;
-    setSaving(true);
-    setErr('');
-    try {
-      if (!persona?.id) throw new Error('没有选中角色卡');
-      // 只提交真正变了的字段：改名字不该顺手把正文也写一遍（少一次整文件重写）
-      const patch = {};
-      if (next.name !== baseline.current.name) patch.name = next.name;
-      if (next.body !== baseline.current.body) patch.body = next.body;
-      const saved = await updatePersona(persona.id, patch);
-      const stored = {
-        name: String(saved?.name ?? next.name),
-        body: String(saved?.body ?? next.body),
-      };
-      baseline.current = stored;
-      // 宿主会 trim 名字 / 空名兜底，用返回值回填，避免输入框和磁盘上的内容不一致
-      setName(stored.name);
-      setBody(stored.body);
-      onSaved?.({ ...stored, id: persona.id, updated: Number(saved?.updated) || 0 });
-      setFlash('已自动保存');
-      if (flashTimer.current) clearTimeout(flashTimer.current);
-      flashTimer.current = setTimeout(() => {
-        flashTimer.current = null;
-        setFlash('');
-      }, SAVED_FLASH_MS);
-    } catch (e) {
-      setErr(`保存失败：${e?.message || e}`);
-    } finally {
-      savingRef.current = false;
-      setSaving(false);
-    }
-  }
+/** 编辑指定角色的名字与正文；registerEditor 让上层离开前等待保存。 */
+export function PersonaSection({ persona, onSaved, registerEditor } = {}) {
+  const personaId = String(persona?.id ?? '');
+  const { editor, state } = useDocumentEditor({
+    documentKey: 'persona:' + personaId,
+    fields: FIELDS,
+    read: () => fetchPersonaById(personaId),
+    write: (input) => updatePersona(personaId, input),
+    onSaved,
+    registerEditor,
+  });
 
   return (
     <>
-      {/* 名字：上下排版（label 在上、输入框整行宽）。
-          名字只是**展示用的角色名**，改它不改目录名 —— 磁盘上的身份始终是目录。
-          旁边的 hint 说明这条区别，免得有人以为改名字会移动文件夹。 */}
       <label className="dsh-mymem-field">
         <span className="dsh-mymem-label">名字</span>
         <input
           className="dsh-mymem-input"
-          value={name}
+          value={state.draft.name}
+          disabled={!state.loaded}
           placeholder="展示用的角色名（不改目录名）"
           spellCheck={false}
-          onChange={(e) => setName(e.target.value)}
-          onBlur={() => void autosave({ name })}
+          onFocus={() => void editor.refresh()}
+          onChange={(event) => editor.change({ name: event.target.value })}
+          onBlur={() => void editor.save()}
         />
       </label>
 
-      <div className="dsh-mymem-hint">
-        改动会自动保存{saving ? ' · 保存中…' : flash ? ` · ${flash}` : ''}
+      <div className="dsh-mymem-settings-row">
+        <span className="dsh-mymem-hint">改动会自动保存</span>
+        <button
+          className="dsh-mymem-btn dsh-mymem-btn--ghost"
+          type="button"
+          disabled={state.loading || state.saving}
+          onClick={() => void editor.refresh()}
+        >
+          {state.loading ? '读取中…' : '刷新'}
+        </button>
       </div>
-
-      {err ? <div className="dsh-mymem-error">{err}</div> : null}
 
       <label className="dsh-mymem-field">
         <span className="dsh-mymem-label">角色信息</span>
         <textarea
           className="dsh-mymem-textarea"
           rows={16}
-          value={body}
+          value={state.draft.body}
+          disabled={!state.loaded}
           placeholder="随便写：她是谁、怎么说话、怎么称呼你……失焦自动保存"
           spellCheck={false}
-          onChange={(e) => setBody(e.target.value)}
-          onBlur={() => void autosave({ body })}
+          onFocus={() => void editor.refresh()}
+          onChange={(event) => editor.change({ body: event.target.value })}
+          onBlur={() => void editor.save()}
         />
       </label>
+      <DocumentEditorFeedback editor={editor} state={state} fields={FIELDS} />
     </>
   );
 }
